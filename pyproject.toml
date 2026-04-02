@@ -8,6 +8,8 @@ dependencies = [
     "temporalio==1.24.0",
     "aiohttp==3.13.3",
     "pydantic==2.12.4",
+    "google-genai==1.66.0",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]

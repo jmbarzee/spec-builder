@@ -12,9 +12,15 @@ coverage.xml
 
 # Virtual environments
 .venv
+.env
+node_modules/
 
 # Data
 bin/
+.demo_builder_runtime/
+.demo_builder_gui_uploads/
+.spec_builder_runtime/
+src/spec_builder_gui/frontend/dist/
 
 # MacOS
 .DS_Store
