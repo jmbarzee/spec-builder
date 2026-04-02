@@ -112,15 +112,15 @@ The workflow package lives in [`src/workflows/spec_builder/`](./src/workflows/sp
 
 ### Fixed Stage Pipeline
 
-The parent workflow coordinates seven fixed child workflows in this order:
+The parent workflow coordinates seven fixed stages in this order:
 
-1. `AcquireContentWorkflow`
-1. `StructuredExtractionWorkflow`
-1. `IntentClassificationWorkflow`
-1. `ExtractionCriticWorkflow`
-1. `DraftSpecWorkflow`
-1. `TemporalBestPracticesReviewWorkflow`
-1. `SupervisorDecisionWorkflow`
+1. `acquire_content` activity
+1. `run_structured_extraction` activity
+1. `run_intent_classification` activity
+1. `run_extraction_critic` activity
+1. `run_draft_spec` activity
+1. `TemporalBestPracticesReviewWorkflow` child workflow
+1. `run_supervisor_decision` activity
 
 The supervisor can:
 

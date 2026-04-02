@@ -206,6 +206,11 @@ class TestGeminiExecutor:
         """
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.setattr(
+            GeminiExecutor,
+            "_load_project_dotenv",
+            staticmethod(lambda: None),
+        )
         executor = GeminiExecutor(api_key=None, client=None)
 
         with pytest.raises(GeminiExecutorError):

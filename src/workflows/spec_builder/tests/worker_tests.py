@@ -25,6 +25,7 @@ class TestSpecBuilderWorker:
         activity_names = {activity.__name__ for activity in SPEC_BUILDER_ACTIVITIES}
 
         assert "SpecBuilderWorkflow" in workflow_names
-        assert "AcquireContentWorkflow" in workflow_names
+        assert "TemporalBestPracticesReviewWorkflow" in workflow_names
+        assert len(workflow_names) == 2
         assert "persist_final_outputs" in activity_names
         assert callable(build_worker)

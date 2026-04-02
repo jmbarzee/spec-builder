@@ -398,7 +398,7 @@ class CancelJobInput(StrictModel):
 
 
 class AcquireContentInput(StrictModel):
-    """Child workflow input for stage 1."""
+    """Stage 1 activity input."""
 
     job_id: str
     artifacts: list[ArtifactInput]
@@ -406,14 +406,14 @@ class AcquireContentInput(StrictModel):
 
 
 class StructuredExtractionInput(StrictModel):
-    """Child workflow input for stage 2."""
+    """Stage 2 activity input."""
 
     job_id: str
     acquisition: AcquisitionOutput
 
 
 class IntentClassificationInput(StrictModel):
-    """Child workflow input for stage 3."""
+    """Stage 3 activity input."""
 
     job_id: str
     extraction: StructuredExtractionOutput
@@ -421,7 +421,7 @@ class IntentClassificationInput(StrictModel):
 
 
 class ExtractionCriticInput(StrictModel):
-    """Child workflow input for stage 4."""
+    """Stage 4 activity input."""
 
     job_id: str
     extraction: StructuredExtractionOutput
@@ -429,7 +429,7 @@ class ExtractionCriticInput(StrictModel):
 
 
 class DraftSpecInput(StrictModel):
-    """Child workflow input for stage 5."""
+    """Stage 5 activity input."""
 
     job_id: str
     extraction: StructuredExtractionOutput
@@ -437,7 +437,7 @@ class DraftSpecInput(StrictModel):
 
 
 class TemporalBestPracticesReviewInput(StrictModel):
-    """Child workflow input for stage 6."""
+    """Retained child workflow input for stage 6."""
 
     job_id: str
     draft: DraftSpecOutput
@@ -453,7 +453,7 @@ class RunBestPracticesReviewActivityInput(StrictModel):
 
 
 class SupervisorDecisionInput(StrictModel):
-    """Child workflow input for stage 7."""
+    """Stage 7 activity input."""
 
     job_id: str
     extraction_critic: CriticOutput

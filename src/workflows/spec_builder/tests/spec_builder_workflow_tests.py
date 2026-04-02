@@ -12,7 +12,6 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from src.workflows.spec_builder.acquire_content_workflow import AcquireContentWorkflow
 from src.workflows.spec_builder.custom_types import (
     AcquireContentInput,
     AcquisitionOutput,
@@ -49,18 +48,7 @@ from src.workflows.spec_builder.custom_types import (
     TraceabilityEntry,
     ContinueAsNewThreshold,
 )
-from src.workflows.spec_builder.draft_spec_workflow import DraftSpecWorkflow
-from src.workflows.spec_builder.extraction_critic_workflow import ExtractionCriticWorkflow
-from src.workflows.spec_builder.intent_classification_workflow import (
-    IntentClassificationWorkflow,
-)
 from src.workflows.spec_builder.spec_builder_workflow import SpecBuilderWorkflow
-from src.workflows.spec_builder.structured_extraction_workflow import (
-    StructuredExtractionWorkflow,
-)
-from src.workflows.spec_builder.supervisor_decision_workflow import (
-    SupervisorDecisionWorkflow,
-)
 from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
     TemporalBestPracticesReviewWorkflow,
 )
@@ -108,7 +96,7 @@ def build_draft(version: int = 1) -> DraftSpecOutput:
             components=[
                 StructuredSpecComponent(
                     name="SpecBuilderWorkflow",
-                    responsibilities=["Coordinate fixed child-workflow stages."],
+                    responsibilities=["Coordinate fixed workflow stages."],
                 )
             ],
             execution_flow=["Acquire", "Extract", "Classify", "Draft", "Review"],
@@ -367,13 +355,7 @@ class TestSpecBuilderWorkflow:
             task_queue=task_queue,
             workflows=[
                 SpecBuilderWorkflow,
-                AcquireContentWorkflow,
-                StructuredExtractionWorkflow,
-                IntentClassificationWorkflow,
-                ExtractionCriticWorkflow,
-                DraftSpecWorkflow,
                 TemporalBestPracticesReviewWorkflow,
-                SupervisorDecisionWorkflow,
             ],
             activities=activities,
         ):

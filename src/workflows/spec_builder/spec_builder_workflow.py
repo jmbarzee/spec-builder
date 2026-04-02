@@ -16,7 +16,6 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.client import Client  # noqa: PLC0415
     from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: PLC0415
 
-    from src.workflows.spec_builder.acquire_content_workflow import AcquireContentWorkflow
     from src.workflows.spec_builder.custom_types import (
         AcquireContentInput,
         ApproveDraftInput,
@@ -42,17 +41,14 @@ with workflow.unsafe.imports_passed_through():
         TemporalBestPracticesReviewInput,
         TraceabilitySummary,
     )
-    from src.workflows.spec_builder.draft_spec_workflow import DraftSpecWorkflow
-    from src.workflows.spec_builder.extraction_critic_workflow import ExtractionCriticWorkflow
-    from src.workflows.spec_builder.intent_classification_workflow import (
-        IntentClassificationWorkflow,
-    )
-    from src.workflows.spec_builder.spec_builder_activities import persist_final_outputs
-    from src.workflows.spec_builder.structured_extraction_workflow import (
-        StructuredExtractionWorkflow,
-    )
-    from src.workflows.spec_builder.supervisor_decision_workflow import (
-        SupervisorDecisionWorkflow,
+    from src.workflows.spec_builder.spec_builder_activities import (
+        acquire_content,
+        persist_final_outputs,
+        run_draft_spec,
+        run_extraction_critic,
+        run_intent_classification,
+        run_structured_extraction,
+        run_supervisor_decision,
     )
     from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
         TemporalBestPracticesReviewWorkflow,
@@ -140,21 +136,36 @@ class SpecBuilderWorkflow:
             final_status=state.final_result.status if state.final_result else None,
         )
 
-    async def _execute_stage_child(
+    async def _execute_stage_activity(
         self,
-        run_method: Any,
+        activity_fn: Any,
         stage_input: object,
         stage_name: str,
     ) -> Any:
         workflow.logger.info(
-            "Starting child stage %s for job %s",
+            "Starting activity stage %s for job %s",
             stage_name,
             self._ensure_state().job_id,
         )
-        return await workflow.execute_child_workflow(
-            run_method,
+        return await workflow.execute_activity(
+            activity_fn,
             stage_input,
-            id=f"{workflow.info().workflow_id}-{stage_name}-{workflow.uuid4()}",
+            start_to_close_timeout=timedelta(minutes=5),
+        )
+
+    async def _execute_best_practices_review(
+        self,
+        stage_input: TemporalBestPracticesReviewInput,
+    ) -> Any:
+        workflow.logger.info(
+            "Starting child stage %s for job %s",
+            "best_practices_review",
+            self._ensure_state().job_id,
+        )
+        return await workflow.execute_child_workflow(
+            TemporalBestPracticesReviewWorkflow.run,
+            stage_input,
+            id=f"{workflow.info().workflow_id}-best-practices-review-{workflow.uuid4()}",
             task_queue=SPEC_BUILDER_TASK_QUEUE,
             parent_close_policy=ParentClosePolicy.TERMINATE,
         )
@@ -419,8 +430,8 @@ class SpecBuilderWorkflow:
 
                 if self.state.restart_point == "acquire":
                     self.state.phase = "acquire"
-                    self.state.acquisition = await self._execute_stage_child(
-                        AcquireContentWorkflow.run,
+                    self.state.acquisition = await self._execute_stage_activity(
+                        acquire_content,
                         AcquireContentInput(
                             job_id=input.job_id,
                             artifacts=input.artifacts,
@@ -437,8 +448,8 @@ class SpecBuilderWorkflow:
                     )
 
                     self.state.phase = "extract"
-                    self.state.extraction = await self._execute_stage_child(
-                        StructuredExtractionWorkflow.run,
+                    self.state.extraction = await self._execute_stage_activity(
+                        run_structured_extraction,
                         StructuredExtractionInput(
                             job_id=input.job_id,
                             acquisition=self.state.acquisition,
@@ -449,8 +460,8 @@ class SpecBuilderWorkflow:
                         self.state.artifact_uris["structured_extraction"] = self.state.extraction.artifact_uri
 
                     self.state.phase = "classify"
-                    self.state.intent = await self._execute_stage_child(
-                        IntentClassificationWorkflow.run,
+                    self.state.intent = await self._execute_stage_activity(
+                        run_intent_classification,
                         IntentClassificationInput(
                             job_id=input.job_id,
                             extraction=self.state.extraction,
@@ -462,8 +473,8 @@ class SpecBuilderWorkflow:
                         self.state.artifact_uris["intent_classification"] = self.state.intent.artifact_uri
 
                 self.state.phase = "critic"
-                self.state.extraction_critic = await self._execute_stage_child(
-                    ExtractionCriticWorkflow.run,
+                self.state.extraction_critic = await self._execute_stage_activity(
+                    run_extraction_critic,
                     ExtractionCriticInput(
                         job_id=input.job_id,
                         extraction=self.state.extraction,
@@ -514,8 +525,8 @@ class SpecBuilderWorkflow:
                     continue
 
                 self.state.phase = "draft"
-                self.state.draft = await self._execute_stage_child(
-                    DraftSpecWorkflow.run,
+                self.state.draft = await self._execute_stage_activity(
+                    run_draft_spec,
                     DraftSpecInput(
                         job_id=input.job_id,
                         extraction=self.state.extraction,
@@ -533,14 +544,12 @@ class SpecBuilderWorkflow:
                 )
 
                 self.state.phase = "best_practices_review"
-                self.state.best_practices_review = await self._execute_stage_child(
-                    TemporalBestPracticesReviewWorkflow.run,
+                self.state.best_practices_review = await self._execute_best_practices_review(
                     TemporalBestPracticesReviewInput(
                         job_id=input.job_id,
                         draft=self.state.draft,
                         corpus_uri=input.options.best_practices_corpus_uri,
                     ),
-                    "best-practices-review",
                 )
                 if self.state.best_practices_review.artifact_uri:
                     self.state.artifact_uris["best_practices_review"] = (
@@ -548,8 +557,8 @@ class SpecBuilderWorkflow:
                     )
 
                 self.state.phase = "supervisor"
-                self.state.supervisor_decision = await self._execute_stage_child(
-                    SupervisorDecisionWorkflow.run,
+                self.state.supervisor_decision = await self._execute_stage_activity(
+                    run_supervisor_decision,
                     SupervisorDecisionInput(
                         job_id=input.job_id,
                         extraction_critic=self.state.extraction_critic,

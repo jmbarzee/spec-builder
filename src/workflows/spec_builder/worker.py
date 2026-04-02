@@ -8,34 +8,16 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
-from src.workflows.spec_builder.acquire_content_workflow import AcquireContentWorkflow
 from src.workflows.spec_builder.custom_types import SPEC_BUILDER_TASK_QUEUE
-from src.workflows.spec_builder.draft_spec_workflow import DraftSpecWorkflow
-from src.workflows.spec_builder.extraction_critic_workflow import ExtractionCriticWorkflow
-from src.workflows.spec_builder.intent_classification_workflow import (
-    IntentClassificationWorkflow,
-)
 from src.workflows.spec_builder.spec_builder_activities import SPEC_BUILDER_ACTIVITIES
 from src.workflows.spec_builder.spec_builder_workflow import SpecBuilderWorkflow
-from src.workflows.spec_builder.structured_extraction_workflow import (
-    StructuredExtractionWorkflow,
-)
-from src.workflows.spec_builder.supervisor_decision_workflow import (
-    SupervisorDecisionWorkflow,
-)
 from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
     TemporalBestPracticesReviewWorkflow,
 )
 
 SPEC_BUILDER_WORKFLOWS = [
     SpecBuilderWorkflow,
-    AcquireContentWorkflow,
-    StructuredExtractionWorkflow,
-    IntentClassificationWorkflow,
-    ExtractionCriticWorkflow,
-    DraftSpecWorkflow,
     TemporalBestPracticesReviewWorkflow,
-    SupervisorDecisionWorkflow,
 ]
 
 
