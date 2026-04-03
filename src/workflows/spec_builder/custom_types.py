@@ -86,13 +86,6 @@ class ArtifactInput(StrictModel):
     title: str | None = None
 
 
-class ContinueAsNewThreshold(StrictModel):
-    """Thresholds that trigger continue-as-new."""
-
-    max_history_length: int | None = 1_500
-    max_iterations_per_run: int | None = 2
-
-
 class SpecBuilderOptions(StrictModel):
     """Workflow runtime options."""
 
@@ -101,9 +94,6 @@ class SpecBuilderOptions(StrictModel):
     max_draft_restarts: int = Field(default=2, ge=0)
     require_human_approval: bool = False
     best_practices_corpus_uri: str | None = None
-    continue_as_new_threshold: ContinueAsNewThreshold = Field(
-        default_factory=ContinueAsNewThreshold
-    )
 
 
 class VisualElement(StrictModel):
@@ -343,6 +333,8 @@ class SpecBuilderState(StrictModel):
     artifact_uris: dict[str, str] = Field(default_factory=dict)
     processed_request_ids: list[str] = Field(default_factory=list)
     approval_note: str | None = None
+    force_finalize_requested: bool = False
+    force_finalize_reason: str | None = None
     canceled: bool = False
     cancel_reason: str | None = None
     final_result: SpecBuilderResult | None = None
@@ -380,6 +372,13 @@ class ApproveDraftInput(StrictModel):
 
     request_id: str
     reviewer_note: str | None = None
+
+
+class ForceFinalizeDraftInput(StrictModel):
+    """Signal payload for force-finalizing the current reviewed draft."""
+
+    request_id: str
+    reason: str
 
 
 class RejectDraftInput(StrictModel):

@@ -72,6 +72,7 @@ def build_running_snapshot(
     *,
     phase: str = "draft",
     pending_human_action: str | None = None,
+    best_practices_violations: list[BestPracticesViolation] | None = None,
 ) -> LiveWorkflowSnapshot:
     """Build a running workflow snapshot for GUI tests."""
     draft = build_draft()
@@ -107,7 +108,8 @@ def build_running_snapshot(
             final_status=None,
         ),
         current_draft=draft,
-        best_practices_violations=[
+        best_practices_violations=best_practices_violations
+        or [
             BestPracticesViolation(
                 severity="medium",
                 issue="Add a clearer approval summary.",
@@ -157,6 +159,7 @@ class FakeTemporalGateway:
         self.started_inputs: list[tuple[str, str, SpecBuilderInput]] = []
         self.snapshots: dict[str, LiveWorkflowSnapshot] = {}
         self.approve_calls: list[tuple[str, str | None]] = []
+        self.force_finalize_calls: list[tuple[str, str]] = []
         self.reject_calls: list[tuple[str, str, str]] = []
         self.feedback_calls: list[tuple[str, str]] = []
         self.cancel_calls: list[tuple[str, str]] = []
@@ -176,6 +179,9 @@ class FakeTemporalGateway:
 
     async def approve(self, workflow_id: str, *, reviewer_note: str | None) -> None:
         self.approve_calls.append((workflow_id, reviewer_note))
+
+    async def force_finalize(self, workflow_id: str, *, reason: str) -> None:
+        self.force_finalize_calls.append((workflow_id, reason))
 
     async def reject(self, workflow_id: str, *, reason: str, restart_point: str) -> None:
         self.reject_calls.append((workflow_id, reason, restart_point))
@@ -317,6 +323,29 @@ async def test_post_review_should_route_approve_reject_feedback_and_cancel(tmp_p
             f"/api/jobs/{job_id}/review",
             json={"action": "approve", "text": "Looks good."},
         )
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="supervisor",
+            best_practices_violations=[
+                BestPracticesViolation(
+                    severity="high",
+                    issue="Current draft still mixes workflow and activity side effects.",
+                    suggested_fix="Move side effects to activities before approval.",
+                )
+            ],
+        )
+        force_finalize_response = await client.post(
+            f"/api/jobs/{job_id}/review",
+            json={
+                "action": "force_finalize",
+                "text": "Accept the known risk and finalize this draft for implementation.",
+            },
+        )
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="waiting_for_approval",
+            pending_human_action="approval",
+        )
         reject_response = await client.post(
             f"/api/jobs/{job_id}/review",
             json={"action": "reject", "text": "Needs one more pass."},
@@ -343,11 +372,18 @@ async def test_post_review_should_route_approve_reject_feedback_and_cancel(tmp_p
         )
 
         assert approve_response.status == 200
+        assert force_finalize_response.status == 200
         assert reject_response.status == 200
         assert feedback_response.status == 200
         assert invalid_feedback_response.status == 400
         assert cancel_response.status == 200
         assert gateway.approve_calls == [(record.workflow_id, "Looks good.")]
+        assert gateway.force_finalize_calls == [
+            (
+                record.workflow_id,
+                "Accept the known risk and finalize this draft for implementation.",
+            )
+        ]
         assert gateway.reject_calls == [(record.workflow_id, "Needs one more pass.", "draft")]
         assert gateway.feedback_calls == [(record.workflow_id, "Clarify the approval criteria.")]
         assert gateway.cancel_calls == [(record.workflow_id, "Stop this run.")]

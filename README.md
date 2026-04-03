@@ -72,7 +72,7 @@ SPEC_BUILDER_GEMINI_MAX_ATTEMPTS=3
    cd src/spec_builder_gui/frontend
    npm install
    npm run build
-   cd ../../..
+   cd ../../.   cd ../../...
    ```
 
 1. **Run the local GUI backend**
@@ -129,7 +129,7 @@ The supervisor can:
 - request a restart from acquisition/extraction
 - ask for human clarification
 
-When `requireHumanApproval` is enabled, a supervisor `accept` moves the workflow into a human approval wait state until `approve_draft` or `reject_draft` is received.
+When `requireHumanApproval` is enabled, a supervisor `accept` moves the workflow into a human approval wait state until `approve_draft` or `reject_draft` is received. The GUI can also send `force_finalize_draft` to finalize the current reviewed draft with an explicit human override note, even when high-severity best-practices violations are still present.
 
 ### GUI-Ready Workflow API
 
@@ -146,6 +146,7 @@ Signals:
 
 - `submit_clarification`
 - `approve_draft`
+- `force_finalize_draft`
 - `reject_draft`
 - `cancel_job`
 
@@ -161,7 +162,7 @@ The GUI backend and frontend live under [`src/spec_builder_gui/`](./src/spec_bui
 - `POST /api/jobs`: create and start a `SpecBuilderWorkflow`
 - `GET /api/jobs`: list and refresh jobs
 - `GET /api/jobs/:jobId`: load job detail, current draft markdown, stage state, violations, and review actions
-- `POST /api/jobs/:jobId/review`: approve, reject, clarify, or cancel an active job
+- `POST /api/jobs/:jobId/review`: approve, reject, force-finalize, clarify, or cancel an active job
 - `POST /api/jobs/:jobId/revise`: create a linked revision job from prior output plus revision notes
 - `GET /api/jobs/:jobId/download`: download final markdown output
 - `POST /api/system/pick-output-directory`: attempt a native local directory picker on supported hosts

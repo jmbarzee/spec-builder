@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 
 import pytest
 from temporalio import activity
 from temporalio.client import Client
-from temporalio.worker import Worker
+from temporalio.worker import (
+    Interceptor,
+    Worker,
+    WorkflowInboundInterceptor,
+    WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
+)
 
 from src.workflows.spec_builder.custom_types import (
     AcquireContentInput,
@@ -20,10 +26,12 @@ from src.workflows.spec_builder.custom_types import (
     ArtifactInput,
     BestPracticesPassage,
     BestPracticesReviewOutput,
+    BestPracticesViolation,
     CancelJobInput,
     CriticOutput,
     DraftSpecInput,
     DraftSpecOutput,
+    ForceFinalizeDraftInput,
     IntentClassificationOutput,
     PersistFinalOutputsInput,
     PersistFinalOutputsOutput,
@@ -46,12 +54,49 @@ from src.workflows.spec_builder.custom_types import (
     SupervisorDecisionInput,
     TemporalBestPracticesReviewInput,
     TraceabilityEntry,
-    ContinueAsNewThreshold,
 )
 from src.workflows.spec_builder.spec_builder_workflow import SpecBuilderWorkflow
 from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
     TemporalBestPracticesReviewWorkflow,
 )
+
+
+class ContinueAsNewSuggestedInfo:
+    """Proxy workflow info that forces continue-as-new suggestion."""
+
+    def __init__(self, info: object) -> None:
+        self._info = info
+
+    def is_continue_as_new_suggested(self) -> bool:
+        """Force the workflow to take its continue-as-new path."""
+        return True
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._info, name)
+
+
+class ContinueAsNewSuggestedOutboundInterceptor(WorkflowOutboundInterceptor):
+    """Workflow outbound interceptor that overrides continue-as-new suggestion."""
+
+    def info(self) -> ContinueAsNewSuggestedInfo:
+        return ContinueAsNewSuggestedInfo(self.next.info())
+
+
+class ContinueAsNewSuggestedInboundInterceptor(WorkflowInboundInterceptor):
+    """Workflow inbound interceptor that injects the outbound info override."""
+
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        self.next.init(ContinueAsNewSuggestedOutboundInterceptor(outbound))
+
+
+class ContinueAsNewSuggestedInterceptor(Interceptor):
+    """Worker interceptor that forces Temporal's continue-as-new suggestion hook."""
+
+    def workflow_interceptor_class(
+        self,
+        _input: WorkflowInterceptorClassInput,
+    ) -> type[WorkflowInboundInterceptor] | None:
+        return ContinueAsNewSuggestedInboundInterceptor
 
 
 def build_structured_extraction() -> StructuredExtractionOutput:
@@ -161,6 +206,9 @@ def build_mock_activities(
     elif scenario == "continue_as_new":
         critic_actions = ["proceed", "proceed"]
         supervisor_actions = ["revise_from_draft", "accept"]
+    elif scenario == "force_finalize":
+        critic_actions = ["proceed"]
+        supervisor_actions = ["ask_human"]
     elif scenario == "cancel":
         critic_actions = ["proceed"]
         supervisor_actions = ["ask_human"]
@@ -238,10 +286,21 @@ def build_mock_activities(
         input: RunBestPracticesReviewActivityInput,
     ) -> BestPracticesReviewOutput:
         counters["review"] += 1
+        violations = []
+        verdict = "pass"
+        if scenario == "force_finalize":
+            violations = [
+                BestPracticesViolation(
+                    severity="high",
+                    issue="Workflow draft relies on a non-deterministic callback path.",
+                    suggested_fix="Move the callback interaction into an activity boundary.",
+                )
+            ]
+            verdict = "revise"
         return BestPracticesReviewOutput(
             retrieved_passages=input.passages,
-            violations=[],
-            verdict="pass",
+            violations=violations,
+            verdict=verdict,
             artifact_uri=f"file:///tmp/review-{counters['review']}.json",
         )
 
@@ -314,7 +373,6 @@ class TestSpecBuilderWorkflow:
         tmp_path,
         *,
         require_human_approval: bool = False,
-        max_iterations_per_run: int = 4,
     ) -> SpecBuilderInput:
         """Build a workflow input fixture."""
         artifact_path = tmp_path / "input.md"
@@ -334,9 +392,6 @@ class TestSpecBuilderWorkflow:
             output_directory=str(tmp_path / "output"),
             options=SpecBuilderOptions(
                 require_human_approval=require_human_approval,
-                continue_as_new_threshold=ContinueAsNewThreshold(
-                    max_iterations_per_run=max_iterations_per_run,
-                ),
             ),
         )
 
@@ -347,6 +402,8 @@ class TestSpecBuilderWorkflow:
         task_queue: str,
         scenario: str,
         input_data: SpecBuilderInput,
+        *,
+        worker_interceptors: Sequence[Interceptor] = (),
     ):
         """Start a worker and workflow for one scenario."""
         activities, counters = build_mock_activities(scenario)
@@ -358,6 +415,7 @@ class TestSpecBuilderWorkflow:
                 TemporalBestPracticesReviewWorkflow,
             ],
             activities=activities,
+            interceptors=worker_interceptors,
         ):
             handle = await client.start_workflow(
                 SpecBuilderWorkflow.run,
@@ -545,18 +603,18 @@ class TestSpecBuilderWorkflow:
             assert counters["acquire"] == 2
 
     @pytest.mark.asyncio
-    async def test_should_continue_as_new_between_iterations_when_threshold_is_reached(
+    async def test_should_continue_as_new_between_iterations_when_temporal_suggests_it(
         self,
         client: Client,
         task_queue: str,
         tmp_path,
     ) -> None:
-        input_data = self.build_input(tmp_path, max_iterations_per_run=1)
         async with self.run_scenario(
             client,
             task_queue,
             "continue_as_new",
-            input_data,
+            self.build_input(tmp_path),
+            worker_interceptors=[ContinueAsNewSuggestedInterceptor()],
         ) as (counters, handle):
             workflow_id = handle.id
             current_handle = client.get_workflow_handle(workflow_id)
@@ -569,6 +627,43 @@ class TestSpecBuilderWorkflow:
             assert status.continuation_count >= 1
             assert result.status == "completed"
             assert counters["draft"] == 2
+
+    @pytest.mark.asyncio
+    async def test_should_force_finalize_reviewed_draft_from_clarification_wait(
+        self,
+        client: Client,
+        task_queue: str,
+        tmp_path,
+    ) -> None:
+        async with self.run_scenario(
+            client,
+            task_queue,
+            "force_finalize",
+            self.build_input(tmp_path),
+        ) as (counters, handle):
+            await wait_for_status(
+                handle,
+                lambda status: status.pending_human_action == "clarification",
+            )
+            await handle.signal(
+                SpecBuilderWorkflow.force_finalize_draft,
+                ForceFinalizeDraftInput(
+                    request_id="force-finalize-1",
+                    reason="Ship the current draft with known high-risk issues documented.",
+                ),
+            )
+            result = await handle.result()
+
+            assert result.status == "completed"
+            assert counters["persist"] == 1
+            assert result.best_practices_review is not None
+            assert any(
+                violation.severity == "high"
+                for violation in result.best_practices_review.violations
+            )
+            assert "Force-finalized from the UI despite high-risk policy violations." in (
+                result.warnings
+            )
 
     @pytest.mark.asyncio
     async def test_should_cancel_when_user_cancels_while_waiting_for_human_input(

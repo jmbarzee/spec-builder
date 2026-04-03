@@ -21,6 +21,10 @@ export function ReviewActions({ detail, onSubmit }: ReviewActionsProps) {
       setError("Clarification feedback cannot be empty.");
       return;
     }
+    if (action === "force_finalize" && !text.trim()) {
+      setError("Force-finalize requires a written justification.");
+      return;
+    }
     setPendingAction(action);
     setError(null);
     try {
@@ -38,7 +42,11 @@ export function ReviewActions({ detail, onSubmit }: ReviewActionsProps) {
     }
   }
 
-  const showTextArea = detail.canReject || detail.canProvideFeedback || detail.status === "running";
+  const showTextArea =
+    detail.canReject ||
+    detail.canProvideFeedback ||
+    detail.canForceFinalize ||
+    detail.status === "running";
 
   return (
     <section className="surface-card review-card">
@@ -49,6 +57,8 @@ export function ReviewActions({ detail, onSubmit }: ReviewActionsProps) {
             ? "A human approval gate is active."
             : detail.pendingHumanAction === "clarification"
               ? "The workflow is waiting for written clarification."
+              : detail.canForceFinalize
+                ? "High-risk policy violations are present. You can override them and finalize the current draft."
               : "You can monitor the workflow here and cancel if needed."}
         </p>
       </div>
@@ -58,14 +68,14 @@ export function ReviewActions({ detail, onSubmit }: ReviewActionsProps) {
           <span>
             {detail.canProvideFeedback
               ? "Clarification"
-              : detail.canReject
-                ? "Rejection feedback"
+              : detail.canReject || detail.canForceFinalize
+                ? "Review notes"
                 : "Notes"}
           </span>
           <textarea
             value={text}
             onChange={(event) => setText(event.target.value)}
-            placeholder="Explain what should change, what is ambiguous, or why this draft should be revised."
+            placeholder="Explain what should change, what is ambiguous, or why you are overriding policy violations."
             rows={5}
           />
         </label>
@@ -92,6 +102,16 @@ export function ReviewActions({ detail, onSubmit }: ReviewActionsProps) {
             onClick={() => void runAction("reject")}
           >
             {pendingAction === "reject" ? "Rejecting..." : "Reject"}
+          </button>
+        ) : null}
+        {detail.canForceFinalize ? (
+          <button
+            type="button"
+            className="secondary-button danger-button"
+            disabled={pendingAction !== null}
+            onClick={() => void runAction("force_finalize")}
+          >
+            {pendingAction === "force_finalize" ? "Finalizing..." : "Force Finalize"}
           </button>
         ) : null}
         {detail.canProvideFeedback ? (
