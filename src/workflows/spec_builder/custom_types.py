@@ -11,7 +11,7 @@ SPEC_BUILDER_TASK_QUEUE = "spec-builder-task-queue"
 
 ArtifactType = Literal["document", "diagram", "image", "slides", "markdown", "notes"]
 OutputTarget = Literal["markdown_spec", "structured_json"]
-RestartPoint = Literal["acquire", "draft", "human_pause"]
+RestartPoint = Literal["acquire", "extract", "draft", "human_pause"]
 WorkflowPhase = Literal[
     "acquire",
     "extract",
@@ -326,6 +326,10 @@ class SpecBuilderState(StrictModel):
     draft: DraftSpecOutput | None = None
     best_practices_review: BestPracticesReviewOutput | None = None
     supervisor_decision: SupervisorDecision | None = None
+    previous_extraction: StructuredExtractionOutput | None = None
+    previous_draft: DraftSpecOutput | None = None
+    previous_best_practices_review: BestPracticesReviewOutput | None = None
+    revision_notes: list[str] = Field(default_factory=list)
     clarifications: list[ClarificationRecord] = Field(default_factory=list)
     last_applied_clarification_count: int = 0
     open_questions: list[str] = Field(default_factory=list)
@@ -395,7 +399,7 @@ class RejectDraftInput(StrictModel):
 
     request_id: str
     reason: str
-    restart_point: Literal["draft", "acquire"] = "draft"
+    restart_point: Literal["draft", "extract", "acquire"] = "draft"
 
 
 class CancelJobInput(StrictModel):
@@ -418,6 +422,9 @@ class StructuredExtractionInput(StrictModel):
 
     job_id: str
     acquisition: AcquisitionOutput
+    clarifications: list[ClarificationRecord] = Field(default_factory=list)
+    revision_notes: list[str] = Field(default_factory=list)
+    previous_extraction: StructuredExtractionOutput | None = None
 
 
 class IntentClassificationInput(StrictModel):
@@ -442,6 +449,10 @@ class DraftSpecInput(StrictModel):
     job_id: str
     extraction: StructuredExtractionOutput
     intent: IntentClassificationOutput
+    clarifications: list[ClarificationRecord] = Field(default_factory=list)
+    revision_notes: list[str] = Field(default_factory=list)
+    previous_draft: DraftSpecOutput | None = None
+    previous_best_practices_review: BestPracticesReviewOutput | None = None
 
 
 class TemporalBestPracticesReviewInput(StrictModel):

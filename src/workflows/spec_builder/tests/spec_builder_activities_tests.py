@@ -180,6 +180,36 @@ def build_draft() -> DraftSpecOutput:
     )
 
 
+def build_structured_extraction() -> StructuredExtractionOutput:
+    """Build a compact extraction fixture."""
+    return StructuredExtractionOutput(
+        entities=[
+            StructuredEntity(
+                id="workflow-parent",
+                type="workflow",
+                name="SpecBuilderWorkflow",
+                source_artifact_ids=["doc-001"],
+            )
+        ],
+        relationships=[
+            StructuredRelationship(
+                type="contains",
+                **{"from": "workflow-parent", "to": "activity-draft"},
+                source_artifact_ids=["doc-001"],
+            )
+        ],
+        facts=[
+            StructuredFact(
+                statement="The workflow must remain deterministic.",
+                classification="explicit",
+                confidence=0.99,
+                source_artifact_ids=["doc-001"],
+            )
+        ],
+        ambiguities=["Clarify whether human approval is required."],
+    )
+
+
 class TestSpecBuilderActivities:
     """Behavior tests for spec builder activities."""
 
@@ -393,6 +423,76 @@ class TestSpecBuilderActivities:
         assert draft.structured_spec_uri is not None
 
     @pytest.mark.asyncio
+    async def test_run_draft_spec_should_include_revision_context_and_increment_draft_version(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Scenario: Draft revision prompt construction
+        Given a previous draft, review findings, clarifications, and revision notes
+        When the draft activity runs another pass
+        Then the prompt should include that revision context and the draft version should advance
+        """
+
+        class PromptCapturingExecutor:
+            """Capture the draft prompt while returning a deterministic draft."""
+
+            def __init__(self) -> None:
+                self.prompt = ""
+
+            def generate_structured(self, **kwargs: object) -> DraftSpecOutput:
+                self.prompt = str(kwargs["prompt"])
+                return build_draft()
+
+        executor = PromptCapturingExecutor()
+        monkeypatch.setattr(
+            "src.workflows.spec_builder.spec_builder_activities._load_executor",
+            lambda: executor,
+        )
+        activity_environment = ActivityEnvironment()
+        previous_draft = build_draft().model_copy(update={"draft_version": 4})
+        review = BestPracticesReviewOutput(
+            retrieved_passages=[],
+            violations=[
+                {
+                    "severity": "high",
+                    "issue": "Move side effects into an activity.",
+                    "suggested_fix": "Do not call external services from workflow code.",
+                }
+            ],
+            verdict="revise",
+        )
+
+        draft = await activity_environment.run(
+            run_draft_spec,
+            DraftSpecInput(
+                job_id="job-draft-revision",
+                extraction=build_structured_extraction(),
+                intent=IntentClassificationOutput(
+                    primary_intent="implementation_spec",
+                    target_audience="codex",
+                    expected_output_formats=["markdown", "json"],
+                    best_practices_profile="temporal_workflow",
+                    confidence=0.94,
+                ),
+                clarifications=[
+                    ClarificationRecord(
+                        request_id="clarification-1",
+                        clarification="Keep the approval gate explicit in the final draft.",
+                    )
+                ],
+                revision_notes=["Tighten the timeout guidance."],
+                previous_draft=previous_draft,
+                previous_best_practices_review=review,
+            ),
+        )
+
+        assert "Keep the approval gate explicit" in executor.prompt
+        assert "Move side effects into an activity." in executor.prompt
+        assert "Tighten the timeout guidance." in executor.prompt
+        assert draft.draft_version == 5
+
+    @pytest.mark.asyncio
     async def test_review_and_supervisor_activities_should_return_structured_decisions_when_executor_succeeds(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -442,5 +542,5 @@ class TestSpecBuilderActivities:
 
         assert review.verdict == "pass_with_warnings"
         assert review.artifact_uri is not None
-        assert decision.action == "revise_from_draft"
+        assert decision.action == "accept"
         assert decision.artifact_uri is not None

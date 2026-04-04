@@ -92,6 +92,14 @@ class SpecBuilderWorkflow:
         self._processed_request_ids.add(request_id)
         state.processed_request_ids = sorted(self._processed_request_ids)
 
+    def _record_revision_notes(self, *note_groups: list[str]) -> None:
+        state = self._ensure_state()
+        state.revision_notes = self._merge_questions(state.revision_notes, *note_groups)
+
+    def _mark_clarifications_applied(self) -> None:
+        state = self._ensure_state()
+        state.last_applied_clarification_count = len(state.clarifications)
+
     def _current_draft_metadata(self) -> DraftMetadata | None:
         state = self._ensure_state()
         if state.draft is None:
@@ -158,18 +166,46 @@ class SpecBuilderWorkflow:
             and state.best_practices_review is not None
         )
 
+    def _should_auto_accept_supervisor_decision(self) -> bool:
+        state = self._ensure_state()
+        if (
+            state.supervisor_decision is None
+            or state.extraction_critic is None
+            or state.best_practices_review is None
+        ):
+            return False
+        if state.supervisor_decision.action not in {"revise_from_draft", "revise_from_extraction"}:
+            return False
+        if state.extraction_critic.recommended_action != "proceed":
+            return False
+        if state.extraction_critic.blocking_issues:
+            return False
+        if state.best_practices_review.verdict != "pass_with_warnings":
+            return False
+        return not any(
+            violation.severity == "high" for violation in state.best_practices_review.violations
+        )
+
     def _prepare_restart(self, restart_point: RestartPoint) -> None:
         state = self._ensure_state()
         state.pending_human_action = None
         self._approval_granted = False
         self._approval_note = None
+        if restart_point in {"acquire", "extract"} and state.extraction is not None:
+            state.previous_extraction = state.extraction
+        if state.draft is not None:
+            state.previous_draft = state.draft
+        if state.best_practices_review is not None:
+            state.previous_best_practices_review = state.best_practices_review
+
         if restart_point == "acquire":
             state.acquisition = None
+            state.artifact_uris.pop("source_bundle", None)
+        if restart_point in {"acquire", "extract"}:
             state.extraction = None
             state.intent = None
             state.extraction_critic = None
             for key in (
-                "source_bundle",
                 "structured_extraction",
                 "intent_classification",
                 "extraction_critic",
@@ -522,7 +558,6 @@ class SpecBuilderWorkflow:
                         ),
                         "acquire",
                     )
-                    self.state.last_applied_clarification_count = len(self.state.clarifications)
                     if self.state.acquisition.source_bundle_uri:
                         self.state.artifact_uris["source_bundle"] = self.state.acquisition.source_bundle_uri
                     self.state.warnings = self._merge_questions(
@@ -530,15 +565,25 @@ class SpecBuilderWorkflow:
                         self.state.acquisition.warnings,
                     )
 
+                if self.state.restart_point in {"acquire", "extract"}:
                     self.state.phase = "extract"
                     self.state.extraction = await self._execute_stage_activity(
                         run_structured_extraction,
                         StructuredExtractionInput(
                             job_id=input.job_id,
                             acquisition=self.state.acquisition,
+                            clarifications=self.state.clarifications,
+                            revision_notes=self.state.revision_notes,
+                            previous_extraction=(
+                                self.state.previous_extraction
+                                if self.state.restart_point == "extract"
+                                else None
+                            ),
                         ),
                         "extract",
                     )
+                    self._mark_clarifications_applied()
+                    self.state.previous_extraction = None
                     if self.state.extraction.artifact_uri:
                         self.state.artifact_uris["structured_extraction"] = self.state.extraction.artifact_uri
 
@@ -573,6 +618,10 @@ class SpecBuilderWorkflow:
                 )
 
                 if self.state.extraction_critic.recommended_action == "reextract":
+                    self._record_revision_notes(
+                        self.state.extraction_critic.blocking_issues,
+                        self.state.extraction_critic.missing_information,
+                    )
                     if self.state.extraction_restarts >= input.options.max_extraction_restarts:
                         clarification_outcome = await self._wait_for_clarification(
                             self.state.open_questions
@@ -591,8 +640,8 @@ class SpecBuilderWorkflow:
                             )
                     else:
                         self.state.extraction_restarts += 1
-                    self.state.restart_point = "acquire"
-                    self._prepare_restart("acquire")
+                    self.state.restart_point = "extract"
+                    self._prepare_restart("extract")
                     await self._advance_iteration(input)
                     continue
 
@@ -612,8 +661,8 @@ class SpecBuilderWorkflow:
                             status="needs_clarification",
                             extra_warning="Timed out waiting for clarification.",
                         )
-                    self.state.restart_point = "acquire"
-                    self._prepare_restart("acquire")
+                    self.state.restart_point = "extract"
+                    self._prepare_restart("extract")
                     await self._advance_iteration(input)
                     continue
 
@@ -624,9 +673,17 @@ class SpecBuilderWorkflow:
                         job_id=input.job_id,
                         extraction=self.state.extraction,
                         intent=self.state.intent,
+                        clarifications=self.state.clarifications,
+                        revision_notes=self.state.revision_notes,
+                        previous_draft=self.state.previous_draft,
+                        previous_best_practices_review=self.state.previous_best_practices_review,
                     ),
                     "draft",
                 )
+                self._mark_clarifications_applied()
+                self.state.revision_notes = []
+                self.state.previous_draft = None
+                self.state.previous_best_practices_review = None
                 if self.state.draft.markdown_spec_uri:
                     self.state.artifact_uris["draft_markdown"] = self.state.draft.markdown_spec_uri
                 if self.state.draft.structured_spec_uri:
@@ -672,6 +729,18 @@ class SpecBuilderWorkflow:
                 if self._has_force_finalize_request():
                     return await self._force_finalize(input)
 
+                if self._should_auto_accept_supervisor_decision():
+                    self.state.supervisor_decision = self.state.supervisor_decision.model_copy(
+                        update={
+                            "action": "accept",
+                            "reason": (
+                                self.state.supervisor_decision.reason
+                                or "No high-severity best-practices issues remain after review."
+                            ),
+                            "questions": [],
+                        }
+                    )
+
                 if self.state.supervisor_decision.action == "accept":
                     if input.options.require_human_approval:
                         approval_outcome = await self._wait_for_approval()
@@ -697,10 +766,15 @@ class SpecBuilderWorkflow:
                                 self.state.open_questions,
                                 [payload.reason],
                             )
+                            self._record_revision_notes([payload.reason])
                             if payload.restart_point == "acquire":
                                 self.state.extraction_restarts += 1
                                 self.state.restart_point = "acquire"
                                 self._prepare_restart("acquire")
+                            elif payload.restart_point == "extract":
+                                self.state.extraction_restarts += 1
+                                self.state.restart_point = "extract"
+                                self._prepare_restart("extract")
                             else:
                                 self.state.draft_restarts += 1
                                 self.state.restart_point = "draft"
@@ -712,6 +786,7 @@ class SpecBuilderWorkflow:
 
                 if self.state.supervisor_decision.action == "revise_from_extraction":
                     reason = self.state.supervisor_decision.reason or "Supervisor requested re-extraction."
+                    self._record_revision_notes([reason])
                     if self.state.extraction_restarts >= input.options.max_extraction_restarts:
                         clarification_outcome = await self._wait_for_clarification([reason])
                         if clarification_outcome == "force_finalize":
@@ -728,14 +803,15 @@ class SpecBuilderWorkflow:
                             )
                     else:
                         self.state.extraction_restarts += 1
-                    self.state.restart_point = "acquire"
-                    self._prepare_restart("acquire")
+                    self.state.restart_point = "extract"
+                    self._prepare_restart("extract")
                     self.state.open_questions = self._merge_questions(
                         self.state.open_questions,
                         [reason],
                     )
                 elif self.state.supervisor_decision.action == "revise_from_draft":
                     reason = self.state.supervisor_decision.reason or "Supervisor requested a draft revision."
+                    self._record_revision_notes([reason])
                     if self.state.draft_restarts >= input.options.max_draft_restarts:
                         clarification_outcome = await self._wait_for_clarification([reason])
                         if clarification_outcome == "force_finalize":
@@ -750,8 +826,8 @@ class SpecBuilderWorkflow:
                                 status="needs_clarification",
                                 extra_warning="Timed out waiting for clarification.",
                             )
-                        self.state.restart_point = "acquire"
-                        self._prepare_restart("acquire")
+                        self.state.restart_point = "draft"
+                        self._prepare_restart("draft")
                     else:
                         self.state.draft_restarts += 1
                         self.state.restart_point = "draft"
@@ -779,8 +855,8 @@ class SpecBuilderWorkflow:
                             status="needs_clarification",
                             extra_warning="Timed out waiting for clarification.",
                         )
-                    self.state.restart_point = "acquire"
-                    self._prepare_restart("acquire")
+                    self.state.restart_point = "draft"
+                    self._prepare_restart("draft")
 
                 await self._advance_iteration(input)
 

@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -282,6 +283,17 @@ class SpecBuilderGuiService:
     def __init__(self, *, job_store: GuiJobStore, temporal_gateway: TemporalGateway) -> None:
         self.job_store = job_store
         self.temporal_gateway = temporal_gateway
+
+    async def _invoke_temporal_action(
+        self,
+        description: str,
+        action: Callable[[], Awaitable[None]],
+    ) -> None:
+        try:
+            await action()
+        except Exception as exc:  # noqa: BLE001
+            message = f"Unable to {description}: {exc}"
+            raise GuiServiceError(message, status_code=409) from exc
 
     def _artifact_type_for_upload(
         self,
@@ -701,7 +713,13 @@ class SpecBuilderGuiService:
         if request.action == "approve":
             if record.pending_human_action != "approval":
                 raise GuiServiceError("This job is not waiting for approval.")
-            await self.temporal_gateway.approve(record.workflow_id, reviewer_note=request.text)
+            await self._invoke_temporal_action(
+                "approve the current draft",
+                lambda: self.temporal_gateway.approve(
+                    record.workflow_id,
+                    reviewer_note=request.text,
+                ),
+            )
             self._append_review_entry(record, kind="approval", text=request.text)
         elif request.action == "force_finalize":
             if record.current_draft_markdown is None:
@@ -715,17 +733,26 @@ class SpecBuilderGuiService:
             if not request.text or not request.text.strip():
                 raise GuiServiceError("Force-finalize requires a written justification.")
             reason = request.text.strip()
-            await self.temporal_gateway.force_finalize(record.workflow_id, reason=reason)
+            await self._invoke_temporal_action(
+                "force-finalize the current draft",
+                lambda: self.temporal_gateway.force_finalize(
+                    record.workflow_id,
+                    reason=reason,
+                ),
+            )
             self._append_review_entry(record, kind="force_finalize", text=reason)
         elif request.action == "reject":
             if record.pending_human_action != "approval":
                 raise GuiServiceError("This job is not waiting for approval.")
             if not request.text or not request.text.strip():
                 raise GuiServiceError("Rejection feedback is required.")
-            await self.temporal_gateway.reject(
-                record.workflow_id,
-                reason=request.text.strip(),
-                restart_point="draft",
+            await self._invoke_temporal_action(
+                "reject the current draft",
+                lambda: self.temporal_gateway.reject(
+                    record.workflow_id,
+                    reason=request.text.strip(),
+                    restart_point="draft",
+                ),
             )
             self._append_review_entry(record, kind="rejection", text=request.text.strip())
         elif request.action == "feedback":
@@ -733,14 +760,23 @@ class SpecBuilderGuiService:
                 raise GuiServiceError("This job is not waiting for clarification feedback.")
             if not request.text or not request.text.strip():
                 raise GuiServiceError("Feedback text is required.")
-            await self.temporal_gateway.submit_clarification(
-                record.workflow_id,
-                clarification=request.text.strip(),
+            await self._invoke_temporal_action(
+                "submit clarification feedback",
+                lambda: self.temporal_gateway.submit_clarification(
+                    record.workflow_id,
+                    clarification=request.text.strip(),
+                ),
             )
             self._append_review_entry(record, kind="feedback", text=request.text.strip())
         else:
             reason = request.text.strip() if request.text else "User canceled from GUI."
-            await self.temporal_gateway.cancel(record.workflow_id, reason=reason)
+            await self._invoke_temporal_action(
+                "cancel the workflow",
+                lambda: self.temporal_gateway.cancel(
+                    record.workflow_id,
+                    reason=reason,
+                ),
+            )
             self._append_review_entry(record, kind="cancel", text=reason)
 
         self.job_store.save_job(record)

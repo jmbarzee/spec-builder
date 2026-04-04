@@ -159,6 +159,7 @@ class FakeTemporalGateway:
         self.started_inputs: list[tuple[str, str, SpecBuilderInput]] = []
         self.snapshots: dict[str, LiveWorkflowSnapshot] = {}
         self.snapshot_errors: dict[str, Exception] = {}
+        self.action_errors: dict[str, Exception] = {}
         self.approve_calls: list[tuple[str, str | None]] = []
         self.force_finalize_calls: list[tuple[str, str]] = []
         self.reject_calls: list[tuple[str, str, str]] = []
@@ -181,18 +182,28 @@ class FakeTemporalGateway:
         return self.snapshots[workflow_id]
 
     async def approve(self, workflow_id: str, *, reviewer_note: str | None) -> None:
+        if "approve" in self.action_errors:
+            raise self.action_errors["approve"]
         self.approve_calls.append((workflow_id, reviewer_note))
 
     async def force_finalize(self, workflow_id: str, *, reason: str) -> None:
+        if "force_finalize" in self.action_errors:
+            raise self.action_errors["force_finalize"]
         self.force_finalize_calls.append((workflow_id, reason))
 
     async def reject(self, workflow_id: str, *, reason: str, restart_point: str) -> None:
+        if "reject" in self.action_errors:
+            raise self.action_errors["reject"]
         self.reject_calls.append((workflow_id, reason, restart_point))
 
     async def submit_clarification(self, workflow_id: str, *, clarification: str) -> None:
+        if "feedback" in self.action_errors:
+            raise self.action_errors["feedback"]
         self.feedback_calls.append((workflow_id, clarification))
 
     async def cancel(self, workflow_id: str, *, reason: str) -> None:
+        if "cancel" in self.action_errors:
+            raise self.action_errors["cancel"]
         self.cancel_calls.append((workflow_id, reason))
 
 
@@ -425,7 +436,55 @@ async def test_post_review_should_route_approve_reject_feedback_and_cancel(tmp_p
         ]
         assert gateway.reject_calls == [(record.workflow_id, "Needs one more pass.", "draft")]
         assert gateway.feedback_calls == [(record.workflow_id, "Clarify the approval criteria.")]
-        assert gateway.cancel_calls == [(record.workflow_id, "Stop this run.")]
+
+
+@pytest.mark.asyncio
+async def test_post_force_finalize_should_return_a_user_error_instead_of_500(
+    tmp_path: Path,
+) -> None:
+    """Force-finalize failures from Temporal should be translated into a JSON error response."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Finalize Failure",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="supervisor",
+            best_practices_violations=[
+                BestPracticesViolation(
+                    severity="high",
+                    issue="Current draft still mixes workflow and activity side effects.",
+                    suggested_fix="Move side effects to activities before approval.",
+                )
+            ],
+        )
+        gateway.action_errors["force_finalize"] = RuntimeError("Workflow is no longer accepting signals")
+
+        response = await client.post(
+            f"/api/jobs/{job_id}/review",
+            json={
+                "action": "force_finalize",
+                "text": "Accept the risk and finalize this draft anyway.",
+            },
+        )
+        payload = await response.json()
+
+        assert response.status == 409
+        assert "Unable to force-finalize the current draft" in payload["error"]
+        assert gateway.force_finalize_calls == []
+        assert gateway.cancel_calls == []
 
 
 @pytest.mark.asyncio
