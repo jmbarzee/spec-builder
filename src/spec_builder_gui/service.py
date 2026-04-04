@@ -47,12 +47,12 @@ from src.workflows.spec_builder.custom_types import (
     RejectDraftInput,
     SPEC_BUILDER_TASK_QUEUE,
     SpecBuilderInput,
+    SpecBuilderLiveState,
     SpecBuilderOptions,
     SpecBuilderResult,
     SpecBuilderStatus,
     SubmitClarificationInput,
     TraceabilitySummary,
-    WorkflowPhase,
 )
 from src.workflows.spec_builder.spec_builder_workflow import SpecBuilderWorkflow
 
@@ -210,18 +210,15 @@ class TemporalSpecBuilderGateway:
         description = await handle.describe()
         workflow_status = description.raw_description.workflow_execution_info.status
         if workflow_status == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING:
-            status = await handle.query(SpecBuilderWorkflow.get_status)
-            current_draft = await handle.query(SpecBuilderWorkflow.get_current_draft)
-            best_practices_violations = await handle.query(
-                SpecBuilderWorkflow.get_best_practices_violations
+            live_state = SpecBuilderLiveState.model_validate(
+                await handle.query(SpecBuilderWorkflow.get_live_state)
             )
-            traceability_summary = await handle.query(SpecBuilderWorkflow.get_traceability_summary)
             return LiveWorkflowSnapshot(
                 workflow_status=workflow_status,
-                status=status,
-                current_draft=current_draft,
-                best_practices_violations=best_practices_violations,
-                traceability_summary=traceability_summary,
+                status=live_state.status,
+                current_draft=live_state.current_draft,
+                best_practices_violations=live_state.best_practices_violations,
+                traceability_summary=live_state.traceability_summary,
             )
         return LiveWorkflowSnapshot(
             workflow_status=workflow_status,
@@ -667,7 +664,11 @@ class SpecBuilderGuiService:
         if record is None:
             raise GuiServiceError("Job not found.", status_code=404)
         if record.status in ACTIVE_JOB_STATUSES:
-            record = await self.refresh_job(job_id)
+            try:
+                record = await self.refresh_job(job_id)
+            except Exception as exc:  # noqa: BLE001
+                record.last_error = str(exc)
+                self.job_store.save_job(record)
         return self._record_to_detail(record)
 
     def _append_review_entry(

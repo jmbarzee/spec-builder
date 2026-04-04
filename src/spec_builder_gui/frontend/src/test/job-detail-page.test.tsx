@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -74,6 +74,7 @@ describe("JobDetailPage", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -113,6 +114,43 @@ describe("JobDetailPage", () => {
       );
     });
     expect(screen.getByText("Acquire Content")).toBeInTheDocument();
+  });
+
+  test("should retry detail polling after a transient load failure", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockRejectedValueOnce(new Error("Temporary detail failure"))
+      .mockResolvedValueOnce(jsonResponse(buildDetail()));
+
+    render(
+      <MemoryRouter
+        initialEntries={["/jobs/job-1"]}
+        future={{
+          v7_relativeSplatPath: true,
+          v7_startTransition: true,
+        }}
+      >
+        <Routes>
+          <Route path="/jobs/:jobId" element={<JobDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Temporary detail failure")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Studio Spec")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   test("should render force-finalize controls and send override review requests", async () => {

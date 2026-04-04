@@ -31,8 +31,10 @@ with workflow.unsafe.imports_passed_through():
         IntentClassificationInput,
         PersistFinalOutputsInput,
         RejectDraftInput,
+        RestartPoint,
         SPEC_BUILDER_TASK_QUEUE,
         SpecBuilderInput,
+        SpecBuilderLiveState,
         SpecBuilderResult,
         SpecBuilderState,
         SpecBuilderStatus,
@@ -137,6 +139,17 @@ class SpecBuilderWorkflow:
             final_status=state.final_result.status if state.final_result else None,
         )
 
+    def _live_state(self) -> SpecBuilderLiveState:
+        state = self._ensure_state()
+        return SpecBuilderLiveState(
+            status=self._status(),
+            current_draft=state.draft,
+            best_practices_violations=(
+                state.best_practices_review.violations if state.best_practices_review else []
+            ),
+            traceability_summary=self._traceability_summary(),
+        )
+
     def _has_force_finalize_request(self) -> bool:
         state = self._ensure_state()
         return (
@@ -144,6 +157,34 @@ class SpecBuilderWorkflow:
             and state.draft is not None
             and state.best_practices_review is not None
         )
+
+    def _prepare_restart(self, restart_point: RestartPoint) -> None:
+        state = self._ensure_state()
+        state.pending_human_action = None
+        self._approval_granted = False
+        self._approval_note = None
+        if restart_point == "acquire":
+            state.acquisition = None
+            state.extraction = None
+            state.intent = None
+            state.extraction_critic = None
+            for key in (
+                "source_bundle",
+                "structured_extraction",
+                "intent_classification",
+                "extraction_critic",
+            ):
+                state.artifact_uris.pop(key, None)
+        state.draft = None
+        state.best_practices_review = None
+        state.supervisor_decision = None
+        for key in (
+            "draft_markdown",
+            "draft_structured",
+            "best_practices_review",
+            "supervisor_decision",
+        ):
+            state.artifact_uris.pop(key, None)
 
     async def _force_finalize(self, input: SpecBuilderInput) -> SpecBuilderResult:
         state = self._ensure_state()
@@ -197,6 +238,11 @@ class SpecBuilderWorkflow:
     def get_status(self) -> SpecBuilderStatus:
         """Return the current workflow status snapshot."""
         return self._status()
+
+    @workflow.query
+    def get_live_state(self) -> SpecBuilderLiveState:
+        """Return the current workflow state needed by the GUI in one snapshot."""
+        return self._live_state()
 
     @workflow.query
     def get_current_phase(self) -> str:
@@ -546,6 +592,7 @@ class SpecBuilderWorkflow:
                     else:
                         self.state.extraction_restarts += 1
                     self.state.restart_point = "acquire"
+                    self._prepare_restart("acquire")
                     await self._advance_iteration(input)
                     continue
 
@@ -566,6 +613,7 @@ class SpecBuilderWorkflow:
                             extra_warning="Timed out waiting for clarification.",
                         )
                     self.state.restart_point = "acquire"
+                    self._prepare_restart("acquire")
                     await self._advance_iteration(input)
                     continue
 
@@ -652,9 +700,11 @@ class SpecBuilderWorkflow:
                             if payload.restart_point == "acquire":
                                 self.state.extraction_restarts += 1
                                 self.state.restart_point = "acquire"
+                                self._prepare_restart("acquire")
                             else:
                                 self.state.draft_restarts += 1
                                 self.state.restart_point = "draft"
+                                self._prepare_restart("draft")
                             await self._advance_iteration(input)
                             continue
                     else:
@@ -679,6 +729,7 @@ class SpecBuilderWorkflow:
                     else:
                         self.state.extraction_restarts += 1
                     self.state.restart_point = "acquire"
+                    self._prepare_restart("acquire")
                     self.state.open_questions = self._merge_questions(
                         self.state.open_questions,
                         [reason],
@@ -700,9 +751,11 @@ class SpecBuilderWorkflow:
                                 extra_warning="Timed out waiting for clarification.",
                             )
                         self.state.restart_point = "acquire"
+                        self._prepare_restart("acquire")
                     else:
                         self.state.draft_restarts += 1
                         self.state.restart_point = "draft"
+                        self._prepare_restart("draft")
                     self.state.open_questions = self._merge_questions(
                         self.state.open_questions,
                         [reason],
@@ -727,6 +780,7 @@ class SpecBuilderWorkflow:
                             extra_warning="Timed out waiting for clarification.",
                         )
                     self.state.restart_point = "acquire"
+                    self._prepare_restart("acquire")
 
                 await self._advance_iteration(input)
 

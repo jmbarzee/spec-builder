@@ -136,6 +136,7 @@ When `requireHumanApproval` is enabled, a supervisor `accept` moves the workflow
 Queries:
 
 - `get_status`
+- `get_live_state`
 - `get_current_phase`
 - `get_current_draft`
 - `get_open_questions`

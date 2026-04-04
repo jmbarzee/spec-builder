@@ -25,8 +25,30 @@ export function JobsPage({ finalOnly = false }: JobsPageProps) {
   useEffect(() => {
     let cancelled = false;
     let timeoutId: number | undefined;
+    let pollInFlight = false;
+
+    function clearScheduledPoll() {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    }
+
+    function schedulePoll(delay: number) {
+      if (cancelled) {
+        return;
+      }
+      clearScheduledPoll();
+      timeoutId = window.setTimeout(() => {
+        void poll();
+      }, delay);
+    }
 
     async function poll() {
+      if (cancelled || pollInFlight) {
+        return;
+      }
+      pollInFlight = true;
       try {
         const response = await api.listJobs({
           search: deferredSearch || undefined,
@@ -46,29 +68,31 @@ export function JobsPage({ finalOnly = false }: JobsPageProps) {
         setError(null);
         const hasActiveJobs = nextJobs.some((job) => !FINAL_STATUSES.includes(job.status));
         const interval = hasActiveJobs ? 3000 : 15000;
-        timeoutId = window.setTimeout(() => {
-          if (document.visibilityState === "visible") {
-            void poll();
-          }
-        }, interval);
+        schedulePoll(interval);
       } catch (caughtError) {
         if (!cancelled) {
           setError(caughtError instanceof Error ? caughtError.message : "Job refresh failed.");
-          timeoutId = window.setTimeout(() => {
-            if (document.visibilityState === "visible") {
-              void poll();
-            }
-          }, 15000);
+          schedulePoll(3000);
         }
+      } finally {
+        pollInFlight = false;
       }
     }
 
+    function handleVisibilityChange() {
+      if (document.visibilityState !== "visible" || pollInFlight) {
+        return;
+      }
+      clearScheduledPoll();
+      void poll();
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     void poll();
     return () => {
       cancelled = true;
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearScheduledPoll();
     };
   }, [deferredSearch, finalOnly, statusFilter]);
 

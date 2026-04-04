@@ -359,6 +359,15 @@ class SpecBuilderStatus(StrictModel):
     final_status: FinalStatus | None = None
 
 
+class SpecBuilderLiveState(StrictModel):
+    """Atomic live snapshot returned by the workflow for GUI polling."""
+
+    status: SpecBuilderStatus
+    current_draft: DraftSpecOutput | None = None
+    best_practices_violations: list[BestPracticesViolation] = Field(default_factory=list)
+    traceability_summary: TraceabilitySummary | None = None
+
+
 class SubmitClarificationInput(StrictModel):
     """Signal payload for clarification."""
 

@@ -158,6 +158,7 @@ class FakeTemporalGateway:
     def __init__(self) -> None:
         self.started_inputs: list[tuple[str, str, SpecBuilderInput]] = []
         self.snapshots: dict[str, LiveWorkflowSnapshot] = {}
+        self.snapshot_errors: dict[str, Exception] = {}
         self.approve_calls: list[tuple[str, str | None]] = []
         self.force_finalize_calls: list[tuple[str, str]] = []
         self.reject_calls: list[tuple[str, str, str]] = []
@@ -175,6 +176,8 @@ class FakeTemporalGateway:
         return StartedWorkflow(workflow_id=workflow_id, run_id="run-001")
 
     async def fetch_snapshot(self, workflow_id: str) -> LiveWorkflowSnapshot:
+        if workflow_id in self.snapshot_errors:
+            raise self.snapshot_errors[workflow_id]
         return self.snapshots[workflow_id]
 
     async def approve(self, workflow_id: str, *, reviewer_note: str | None) -> None:
@@ -293,6 +296,42 @@ async def test_get_jobs_and_detail_should_merge_live_temporal_state(tmp_path: Pa
         assert detail_payload["status"] == "running"
         assert detail_payload["currentPhase"] == "draft"
         assert detail_payload["currentDraftMarkdown"].startswith("# Spec")
+
+
+@pytest.mark.asyncio
+async def test_get_job_detail_should_fall_back_to_stored_state_when_refresh_fails(
+    tmp_path: Path,
+) -> None:
+    """Detail endpoint should return the last stored snapshot when Temporal refresh fails."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Fallback Detail",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+        record.status = "running"
+        record.current_phase = "draft"
+        record.current_draft_markdown = "# Cached draft\n\nStill visible.\n"
+        service.job_store.save_job(record)
+        gateway.snapshot_errors[record.workflow_id] = RuntimeError("Temporal query unavailable")
+
+        detail_response = await client.get(f"/api/jobs/{job_id}")
+        detail_payload = await detail_response.json()
+
+        assert detail_response.status == 200
+        assert detail_payload["status"] == "running"
+        assert detail_payload["currentPhase"] == "draft"
+        assert detail_payload["currentDraftMarkdown"].startswith("# Cached draft")
+        assert detail_payload["lastError"] == "Temporal query unavailable"
 
 
 @pytest.mark.asyncio
