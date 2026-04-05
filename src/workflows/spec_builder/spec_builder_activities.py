@@ -297,6 +297,24 @@ def _render_traceability_summary(draft: DraftSpecOutput) -> TraceabilitySummary:
     )
 
 
+def _should_auto_accept(
+    critic: CriticOutput,
+    review: BestPracticesReviewOutput,
+    decision: SupervisorDecision,
+) -> bool:
+    """Return whether low-risk review output should be accepted without another rewrite."""
+    has_high_risk_violation = any(
+        violation.severity == "high" for violation in review.violations
+    )
+    return (
+        decision.action in {"revise_from_draft", "revise_from_extraction"}
+        and critic.recommended_action == "proceed"
+        and not critic.blocking_issues
+        and review.verdict == "pass_with_warnings"
+        and not has_high_risk_violation
+    )
+
+
 def _chunk_markdown_by_heading(text: str) -> list[tuple[str, str]]:
     chunks: list[tuple[str, str]] = []
     current_heading = "Introduction"
@@ -412,7 +430,12 @@ async def run_structured_extraction(input: StructuredExtractionInput) -> Structu
     executor = _load_executor()
     extraction = executor.generate_structured(
         stage_name="structured_extraction",
-        prompt=build_structured_extraction_prompt(input.acquisition),
+        prompt=build_structured_extraction_prompt(
+            input.acquisition,
+            input.clarifications,
+            input.revision_notes,
+            input.previous_extraction,
+        ),
         response_model=StructuredExtractionOutput,
         system_instruction=build_structured_extraction_system_instruction(),
     )
@@ -462,18 +485,31 @@ async def run_draft_spec(input: DraftSpecInput) -> DraftSpecOutput:
     executor = _load_executor()
     draft = executor.generate_structured(
         stage_name="draft_spec",
-        prompt=build_draft_spec_prompt(input.extraction, input.intent),
+        prompt=build_draft_spec_prompt(
+            input.extraction,
+            input.intent,
+            input.clarifications,
+            input.revision_notes,
+            input.previous_draft,
+            input.previous_best_practices_review,
+        ),
         response_model=DraftSpecOutput,
         system_instruction=build_draft_spec_system_instruction(),
     )
     assumptions = draft.assumptions or draft.structured_spec.assumptions
     open_questions = draft.open_questions or draft.structured_spec.open_questions
     summary = draft.summary or draft.structured_spec.objective
+    next_draft_version = (
+        input.previous_draft.draft_version + 1
+        if input.previous_draft is not None
+        else draft.draft_version
+    )
     draft = draft.model_copy(
         update={
             "assumptions": _dedupe_strings(assumptions),
             "open_questions": _dedupe_strings(open_questions),
             "summary": summary,
+            "draft_version": max(draft.draft_version, next_draft_version),
         }
     )
     drafts_dir = _stage_dir(input.job_id, "drafts")
@@ -593,6 +629,17 @@ async def run_supervisor_decision(input: SupervisorDecisionInput) -> SupervisorD
                     + input.extraction_critic.missing_information
                     + [violation.issue for violation in input.best_practices_review.violations]
                 )[:5]
+            }
+        )
+    elif _should_auto_accept(input.extraction_critic, input.best_practices_review, decision):
+        decision = decision.model_copy(
+            update={
+                "action": "accept",
+                "reason": (
+                    decision.reason
+                    or "No high-severity best-practices issues remain after review."
+                ),
+                "questions": [],
             }
         )
     review_dir = _stage_dir(input.job_id, "review")

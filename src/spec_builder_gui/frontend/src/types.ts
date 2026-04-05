@@ -38,7 +38,7 @@ export type ReviewFeedbackEntry = {
   id: string;
   createdAt: string;
   author: string;
-  kind: "feedback" | "approval" | "rejection" | "cancel";
+  kind: "feedback" | "approval" | "rejection" | "force_finalize" | "cancel";
   text?: string | null;
 };
 
@@ -123,6 +123,7 @@ export type JobDetail = {
   canApprove: boolean;
   canReject: boolean;
   canProvideFeedback: boolean;
+  canForceFinalize: boolean;
   canDownload: boolean;
   canCreateRevision: boolean;
   canApproveRevisionAsFinal: boolean;
@@ -163,7 +164,7 @@ export type ListJobsResponse = {
 };
 
 export type SubmitReviewRequest = {
-  action: "approve" | "reject" | "feedback" | "cancel";
+  action: "approve" | "reject" | "feedback" | "force_finalize" | "cancel";
   text?: string;
 };
 

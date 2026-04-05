@@ -26,7 +26,7 @@ GuiJobStatus = Literal[
     "cancelled",
 ]
 UploadedArtifactKind = Literal["pdf", "image", "markdown", "notes"]
-ReviewEntryKind = Literal["feedback", "approval", "rejection", "cancel"]
+ReviewEntryKind = Literal["feedback", "approval", "rejection", "force_finalize", "cancel"]
 StageName = Literal[
     "acquire",
     "extract",
@@ -37,7 +37,7 @@ StageName = Literal[
     "supervisor",
 ]
 StageExecutionStatus = Literal["not_started", "running", "completed", "failed", "skipped"]
-ReviewAction = Literal["approve", "reject", "feedback", "cancel"]
+ReviewAction = Literal["approve", "reject", "feedback", "force_finalize", "cancel"]
 
 
 def to_camel(value: str) -> str:
@@ -133,6 +133,7 @@ class JobDetail(ApiModel):
     can_approve: bool = False
     can_reject: bool = False
     can_provide_feedback: bool = False
+    can_force_finalize: bool = False
     can_download: bool = False
     can_create_revision: bool = False
     can_approve_revision_as_final: bool = False

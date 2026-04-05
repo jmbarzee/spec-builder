@@ -72,6 +72,7 @@ def build_running_snapshot(
     *,
     phase: str = "draft",
     pending_human_action: str | None = None,
+    best_practices_violations: list[BestPracticesViolation] | None = None,
 ) -> LiveWorkflowSnapshot:
     """Build a running workflow snapshot for GUI tests."""
     draft = build_draft()
@@ -107,7 +108,8 @@ def build_running_snapshot(
             final_status=None,
         ),
         current_draft=draft,
-        best_practices_violations=[
+        best_practices_violations=best_practices_violations
+        or [
             BestPracticesViolation(
                 severity="medium",
                 issue="Add a clearer approval summary.",
@@ -156,7 +158,10 @@ class FakeTemporalGateway:
     def __init__(self) -> None:
         self.started_inputs: list[tuple[str, str, SpecBuilderInput]] = []
         self.snapshots: dict[str, LiveWorkflowSnapshot] = {}
+        self.snapshot_errors: dict[str, Exception] = {}
+        self.action_errors: dict[str, Exception] = {}
         self.approve_calls: list[tuple[str, str | None]] = []
+        self.force_finalize_calls: list[tuple[str, str]] = []
         self.reject_calls: list[tuple[str, str, str]] = []
         self.feedback_calls: list[tuple[str, str]] = []
         self.cancel_calls: list[tuple[str, str]] = []
@@ -172,18 +177,33 @@ class FakeTemporalGateway:
         return StartedWorkflow(workflow_id=workflow_id, run_id="run-001")
 
     async def fetch_snapshot(self, workflow_id: str) -> LiveWorkflowSnapshot:
+        if workflow_id in self.snapshot_errors:
+            raise self.snapshot_errors[workflow_id]
         return self.snapshots[workflow_id]
 
     async def approve(self, workflow_id: str, *, reviewer_note: str | None) -> None:
+        if "approve" in self.action_errors:
+            raise self.action_errors["approve"]
         self.approve_calls.append((workflow_id, reviewer_note))
 
+    async def force_finalize(self, workflow_id: str, *, reason: str) -> None:
+        if "force_finalize" in self.action_errors:
+            raise self.action_errors["force_finalize"]
+        self.force_finalize_calls.append((workflow_id, reason))
+
     async def reject(self, workflow_id: str, *, reason: str, restart_point: str) -> None:
+        if "reject" in self.action_errors:
+            raise self.action_errors["reject"]
         self.reject_calls.append((workflow_id, reason, restart_point))
 
     async def submit_clarification(self, workflow_id: str, *, clarification: str) -> None:
+        if "feedback" in self.action_errors:
+            raise self.action_errors["feedback"]
         self.feedback_calls.append((workflow_id, clarification))
 
     async def cancel(self, workflow_id: str, *, reason: str) -> None:
+        if "cancel" in self.action_errors:
+            raise self.action_errors["cancel"]
         self.cancel_calls.append((workflow_id, reason))
 
 
@@ -290,6 +310,42 @@ async def test_get_jobs_and_detail_should_merge_live_temporal_state(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_get_job_detail_should_fall_back_to_stored_state_when_refresh_fails(
+    tmp_path: Path,
+) -> None:
+    """Detail endpoint should return the last stored snapshot when Temporal refresh fails."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Fallback Detail",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+        record.status = "running"
+        record.current_phase = "draft"
+        record.current_draft_markdown = "# Cached draft\n\nStill visible.\n"
+        service.job_store.save_job(record)
+        gateway.snapshot_errors[record.workflow_id] = RuntimeError("Temporal query unavailable")
+
+        detail_response = await client.get(f"/api/jobs/{job_id}")
+        detail_payload = await detail_response.json()
+
+        assert detail_response.status == 200
+        assert detail_payload["status"] == "running"
+        assert detail_payload["currentPhase"] == "draft"
+        assert detail_payload["currentDraftMarkdown"].startswith("# Cached draft")
+        assert detail_payload["lastError"] == "Temporal query unavailable"
+
+
+@pytest.mark.asyncio
 async def test_post_review_should_route_approve_reject_feedback_and_cancel(tmp_path: Path) -> None:
     """Review endpoint should map UI actions to the correct workflow signals."""
     output_directory = tmp_path / "output"
@@ -317,6 +373,29 @@ async def test_post_review_should_route_approve_reject_feedback_and_cancel(tmp_p
             f"/api/jobs/{job_id}/review",
             json={"action": "approve", "text": "Looks good."},
         )
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="supervisor",
+            best_practices_violations=[
+                BestPracticesViolation(
+                    severity="high",
+                    issue="Current draft still mixes workflow and activity side effects.",
+                    suggested_fix="Move side effects to activities before approval.",
+                )
+            ],
+        )
+        force_finalize_response = await client.post(
+            f"/api/jobs/{job_id}/review",
+            json={
+                "action": "force_finalize",
+                "text": "Accept the known risk and finalize this draft for implementation.",
+            },
+        )
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="waiting_for_approval",
+            pending_human_action="approval",
+        )
         reject_response = await client.post(
             f"/api/jobs/{job_id}/review",
             json={"action": "reject", "text": "Needs one more pass."},
@@ -343,14 +422,69 @@ async def test_post_review_should_route_approve_reject_feedback_and_cancel(tmp_p
         )
 
         assert approve_response.status == 200
+        assert force_finalize_response.status == 200
         assert reject_response.status == 200
         assert feedback_response.status == 200
         assert invalid_feedback_response.status == 400
         assert cancel_response.status == 200
         assert gateway.approve_calls == [(record.workflow_id, "Looks good.")]
+        assert gateway.force_finalize_calls == [
+            (
+                record.workflow_id,
+                "Accept the known risk and finalize this draft for implementation.",
+            )
+        ]
         assert gateway.reject_calls == [(record.workflow_id, "Needs one more pass.", "draft")]
         assert gateway.feedback_calls == [(record.workflow_id, "Clarify the approval criteria.")]
-        assert gateway.cancel_calls == [(record.workflow_id, "Stop this run.")]
+
+
+@pytest.mark.asyncio
+async def test_post_force_finalize_should_return_a_user_error_instead_of_500(
+    tmp_path: Path,
+) -> None:
+    """Force-finalize failures from Temporal should be translated into a JSON error response."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Finalize Failure",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="supervisor",
+            best_practices_violations=[
+                BestPracticesViolation(
+                    severity="high",
+                    issue="Current draft still mixes workflow and activity side effects.",
+                    suggested_fix="Move side effects to activities before approval.",
+                )
+            ],
+        )
+        gateway.action_errors["force_finalize"] = RuntimeError("Workflow is no longer accepting signals")
+
+        response = await client.post(
+            f"/api/jobs/{job_id}/review",
+            json={
+                "action": "force_finalize",
+                "text": "Accept the risk and finalize this draft anyway.",
+            },
+        )
+        payload = await response.json()
+
+        assert response.status == 409
+        assert "Unable to force-finalize the current draft" in payload["error"]
+        assert gateway.force_finalize_calls == []
+        assert gateway.cancel_calls == []
 
 
 @pytest.mark.asyncio

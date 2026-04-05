@@ -16,7 +16,6 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.client import Client  # noqa: PLC0415
     from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: PLC0415
 
-    from src.workflows.spec_builder.acquire_content_workflow import AcquireContentWorkflow
     from src.workflows.spec_builder.custom_types import (
         AcquireContentInput,
         ApproveDraftInput,
@@ -28,11 +27,14 @@ with workflow.unsafe.imports_passed_through():
         DraftSpecInput,
         DraftSpecOutput,
         ExtractionCriticInput,
+        ForceFinalizeDraftInput,
         IntentClassificationInput,
         PersistFinalOutputsInput,
         RejectDraftInput,
+        RestartPoint,
         SPEC_BUILDER_TASK_QUEUE,
         SpecBuilderInput,
+        SpecBuilderLiveState,
         SpecBuilderResult,
         SpecBuilderState,
         SpecBuilderStatus,
@@ -42,17 +44,14 @@ with workflow.unsafe.imports_passed_through():
         TemporalBestPracticesReviewInput,
         TraceabilitySummary,
     )
-    from src.workflows.spec_builder.draft_spec_workflow import DraftSpecWorkflow
-    from src.workflows.spec_builder.extraction_critic_workflow import ExtractionCriticWorkflow
-    from src.workflows.spec_builder.intent_classification_workflow import (
-        IntentClassificationWorkflow,
-    )
-    from src.workflows.spec_builder.spec_builder_activities import persist_final_outputs
-    from src.workflows.spec_builder.structured_extraction_workflow import (
-        StructuredExtractionWorkflow,
-    )
-    from src.workflows.spec_builder.supervisor_decision_workflow import (
-        SupervisorDecisionWorkflow,
+    from src.workflows.spec_builder.spec_builder_activities import (
+        acquire_content,
+        persist_final_outputs,
+        run_draft_spec,
+        run_extraction_critic,
+        run_intent_classification,
+        run_structured_extraction,
+        run_supervisor_decision,
     )
     from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
         TemporalBestPracticesReviewWorkflow,
@@ -92,6 +91,14 @@ class SpecBuilderWorkflow:
         state = self._ensure_state()
         self._processed_request_ids.add(request_id)
         state.processed_request_ids = sorted(self._processed_request_ids)
+
+    def _record_revision_notes(self, *note_groups: list[str]) -> None:
+        state = self._ensure_state()
+        state.revision_notes = self._merge_questions(state.revision_notes, *note_groups)
+
+    def _mark_clarifications_applied(self) -> None:
+        state = self._ensure_state()
+        state.last_applied_clarification_count = len(state.clarifications)
 
     def _current_draft_metadata(self) -> DraftMetadata | None:
         state = self._ensure_state()
@@ -140,21 +147,125 @@ class SpecBuilderWorkflow:
             final_status=state.final_result.status if state.final_result else None,
         )
 
-    async def _execute_stage_child(
+    def _live_state(self) -> SpecBuilderLiveState:
+        state = self._ensure_state()
+        return SpecBuilderLiveState(
+            status=self._status(),
+            current_draft=state.draft,
+            best_practices_violations=(
+                state.best_practices_review.violations if state.best_practices_review else []
+            ),
+            traceability_summary=self._traceability_summary(),
+        )
+
+    def _has_force_finalize_request(self) -> bool:
+        state = self._ensure_state()
+        return (
+            state.force_finalize_requested
+            and state.draft is not None
+            and state.best_practices_review is not None
+        )
+
+    def _should_auto_accept_supervisor_decision(self) -> bool:
+        state = self._ensure_state()
+        if (
+            state.supervisor_decision is None
+            or state.extraction_critic is None
+            or state.best_practices_review is None
+        ):
+            return False
+        if state.supervisor_decision.action not in {"revise_from_draft", "revise_from_extraction"}:
+            return False
+        if state.extraction_critic.recommended_action != "proceed":
+            return False
+        if state.extraction_critic.blocking_issues:
+            return False
+        if state.best_practices_review.verdict != "pass_with_warnings":
+            return False
+        return not any(
+            violation.severity == "high" for violation in state.best_practices_review.violations
+        )
+
+    def _prepare_restart(self, restart_point: RestartPoint) -> None:
+        state = self._ensure_state()
+        state.pending_human_action = None
+        self._approval_granted = False
+        self._approval_note = None
+        if restart_point in {"acquire", "extract"} and state.extraction is not None:
+            state.previous_extraction = state.extraction
+        if state.draft is not None:
+            state.previous_draft = state.draft
+        if state.best_practices_review is not None:
+            state.previous_best_practices_review = state.best_practices_review
+
+        if restart_point == "acquire":
+            state.acquisition = None
+            state.artifact_uris.pop("source_bundle", None)
+        if restart_point in {"acquire", "extract"}:
+            state.extraction = None
+            state.intent = None
+            state.extraction_critic = None
+            for key in (
+                "structured_extraction",
+                "intent_classification",
+                "extraction_critic",
+            ):
+                state.artifact_uris.pop(key, None)
+        state.draft = None
+        state.best_practices_review = None
+        state.supervisor_decision = None
+        for key in (
+            "draft_markdown",
+            "draft_structured",
+            "best_practices_review",
+            "supervisor_decision",
+        ):
+            state.artifact_uris.pop(key, None)
+
+    async def _force_finalize(self, input: SpecBuilderInput) -> SpecBuilderResult:
+        state = self._ensure_state()
+        force_finalize_warnings = ["Force-finalized from the UI despite high-risk policy violations."]
+        if state.force_finalize_reason:
+            force_finalize_warnings.append(
+                f"Force-finalize note: {state.force_finalize_reason}"
+            )
+            state.approval_note = state.force_finalize_reason
+        state.warnings = self._merge_questions(state.warnings, force_finalize_warnings)
+        state.pending_human_action = None
+        state.force_finalize_requested = False
+        state.force_finalize_reason = None
+        return await self._complete(input)
+
+    async def _execute_stage_activity(
         self,
-        run_method: Any,
+        activity_fn: Any,
         stage_input: object,
         stage_name: str,
     ) -> Any:
         workflow.logger.info(
-            "Starting child stage %s for job %s",
+            "Starting activity stage %s for job %s",
             stage_name,
             self._ensure_state().job_id,
         )
-        return await workflow.execute_child_workflow(
-            run_method,
+        return await workflow.execute_activity(
+            activity_fn,
             stage_input,
-            id=f"{workflow.info().workflow_id}-{stage_name}-{workflow.uuid4()}",
+            start_to_close_timeout=timedelta(minutes=5),
+        )
+
+    async def _execute_best_practices_review(
+        self,
+        stage_input: TemporalBestPracticesReviewInput,
+    ) -> Any:
+        workflow.logger.info(
+            "Starting child stage %s for job %s",
+            "best_practices_review",
+            self._ensure_state().job_id,
+        )
+        return await workflow.execute_child_workflow(
+            TemporalBestPracticesReviewWorkflow.run,
+            stage_input,
+            id=f"{workflow.info().workflow_id}-best-practices-review-{workflow.uuid4()}",
             task_queue=SPEC_BUILDER_TASK_QUEUE,
             parent_close_policy=ParentClosePolicy.TERMINATE,
         )
@@ -163,6 +274,11 @@ class SpecBuilderWorkflow:
     def get_status(self) -> SpecBuilderStatus:
         """Return the current workflow status snapshot."""
         return self._status()
+
+    @workflow.query
+    def get_live_state(self) -> SpecBuilderLiveState:
+        """Return the current workflow state needed by the GUI in one snapshot."""
+        return self._live_state()
 
     @workflow.query
     def get_current_phase(self) -> str:
@@ -229,6 +345,24 @@ class SpecBuilderWorkflow:
         self._approval_note = payload.reviewer_note
 
     @workflow.signal
+    def force_finalize_draft(self, payload: ForceFinalizeDraftInput) -> None:
+        """Force-finalize the current reviewed draft."""
+        if self.state is None:
+            workflow.logger.warning("Force finalize received before state initialization.")
+            return
+        if self._seen_request(payload.request_id):
+            return
+        self._record_request(payload.request_id)
+        if self.state.draft is None or self.state.best_practices_review is None:
+            self.state.warnings = self._merge_questions(
+                self.state.warnings,
+                ["Received force_finalize_draft before a reviewed draft was available."],
+            )
+            return
+        self.state.force_finalize_requested = True
+        self.state.force_finalize_reason = payload.reason
+
+    @workflow.signal
     def reject_draft(self, payload: RejectDraftInput) -> None:
         """Reject the current draft when human approval is pending."""
         if self.state is None:
@@ -257,7 +391,7 @@ class SpecBuilderWorkflow:
         self.state.canceled = True
         self.state.cancel_reason = payload.reason
 
-    async def _wait_for_clarification(self, questions: list[str]) -> bool:
+    async def _wait_for_clarification(self, questions: list[str]) -> str:
         state = self._ensure_state()
         state.phase = "waiting_for_human"
         state.pending_human_action = "clarification"
@@ -267,16 +401,19 @@ class SpecBuilderWorkflow:
             try:
                 await workflow.wait_condition(
                     lambda: self._ensure_state().canceled
+                    or self._ensure_state().force_finalize_requested
                     or len(self._ensure_state().clarifications) > baseline,
                     timeout=HUMAN_RESPONSE_TIMEOUT,
                     timeout_summary="waiting for clarification",
                 )
             except TimeoutError:
-                return False
+                return "timeout"
+        if state.force_finalize_requested:
+            return "force_finalize"
         if state.canceled:
-            return False
+            return "canceled"
         state.pending_human_action = None
-        return True
+        return "clarified"
 
     async def _wait_for_approval(self) -> str:
         state = self._ensure_state()
@@ -287,12 +424,15 @@ class SpecBuilderWorkflow:
                 await workflow.wait_condition(
                     lambda: self._approval_granted
                     or self._rejection_payload is not None
+                    or self._ensure_state().force_finalize_requested
                     or self._ensure_state().canceled,
                     timeout=HUMAN_RESPONSE_TIMEOUT,
                     timeout_summary="waiting for approval",
                 )
             except TimeoutError:
                 return "timeout"
+        if state.force_finalize_requested:
+            return "force_finalize"
         if state.canceled:
             return "canceled"
         if self._approval_granted:
@@ -309,22 +449,7 @@ class SpecBuilderWorkflow:
         state = self._ensure_state()
         state.iteration += 1
         state.iterations_in_current_run += 1
-        threshold = input.options.continue_as_new_threshold
-
-        should_continue = False
-        if (
-            threshold.max_iterations_per_run is not None
-            and state.iterations_in_current_run >= threshold.max_iterations_per_run
-        ):
-            should_continue = True
-        if (
-            threshold.max_history_length is not None
-            and workflow.info().get_current_history_length() >= threshold.max_history_length
-        ):
-            should_continue = True
-        if workflow.info().is_continue_as_new_suggested():
-            should_continue = True
-        if not should_continue:
+        if not workflow.info().is_continue_as_new_suggested():
             return
 
         await workflow.wait_condition(workflow.all_handlers_finished)
@@ -335,7 +460,9 @@ class SpecBuilderWorkflow:
                 "continuation_count": state.continuation_count + 1,
             },
         )
-        workflow.continue_as_new(input.model_copy(deep=True, update={"resume_state": resumed_state}))
+        workflow.continue_as_new(
+            input.model_copy(deep=True, update={"resume_state": resumed_state})
+        )
 
     async def _complete(self, input: SpecBuilderInput) -> SpecBuilderResult:
         state = self._ensure_state()
@@ -411,6 +538,9 @@ class SpecBuilderWorkflow:
 
         try:
             while self.state.iteration < input.options.max_iterations:
+                if self._has_force_finalize_request():
+                    return await self._force_finalize(input)
+
                 if self.state.canceled:
                     return self._result_from_state(
                         status="cancelled",
@@ -419,8 +549,8 @@ class SpecBuilderWorkflow:
 
                 if self.state.restart_point == "acquire":
                     self.state.phase = "acquire"
-                    self.state.acquisition = await self._execute_stage_child(
-                        AcquireContentWorkflow.run,
+                    self.state.acquisition = await self._execute_stage_activity(
+                        acquire_content,
                         AcquireContentInput(
                             job_id=input.job_id,
                             artifacts=input.artifacts,
@@ -428,7 +558,6 @@ class SpecBuilderWorkflow:
                         ),
                         "acquire",
                     )
-                    self.state.last_applied_clarification_count = len(self.state.clarifications)
                     if self.state.acquisition.source_bundle_uri:
                         self.state.artifact_uris["source_bundle"] = self.state.acquisition.source_bundle_uri
                     self.state.warnings = self._merge_questions(
@@ -436,21 +565,31 @@ class SpecBuilderWorkflow:
                         self.state.acquisition.warnings,
                     )
 
+                if self.state.restart_point in {"acquire", "extract"}:
                     self.state.phase = "extract"
-                    self.state.extraction = await self._execute_stage_child(
-                        StructuredExtractionWorkflow.run,
+                    self.state.extraction = await self._execute_stage_activity(
+                        run_structured_extraction,
                         StructuredExtractionInput(
                             job_id=input.job_id,
                             acquisition=self.state.acquisition,
+                            clarifications=self.state.clarifications,
+                            revision_notes=self.state.revision_notes,
+                            previous_extraction=(
+                                self.state.previous_extraction
+                                if self.state.restart_point == "extract"
+                                else None
+                            ),
                         ),
                         "extract",
                     )
+                    self._mark_clarifications_applied()
+                    self.state.previous_extraction = None
                     if self.state.extraction.artifact_uri:
                         self.state.artifact_uris["structured_extraction"] = self.state.extraction.artifact_uri
 
                     self.state.phase = "classify"
-                    self.state.intent = await self._execute_stage_child(
-                        IntentClassificationWorkflow.run,
+                    self.state.intent = await self._execute_stage_activity(
+                        run_intent_classification,
                         IntentClassificationInput(
                             job_id=input.job_id,
                             extraction=self.state.extraction,
@@ -462,8 +601,8 @@ class SpecBuilderWorkflow:
                         self.state.artifact_uris["intent_classification"] = self.state.intent.artifact_uri
 
                 self.state.phase = "critic"
-                self.state.extraction_critic = await self._execute_stage_child(
-                    ExtractionCriticWorkflow.run,
+                self.state.extraction_critic = await self._execute_stage_activity(
+                    run_extraction_critic,
                     ExtractionCriticInput(
                         job_id=input.job_id,
                         extraction=self.state.extraction,
@@ -479,50 +618,72 @@ class SpecBuilderWorkflow:
                 )
 
                 if self.state.extraction_critic.recommended_action == "reextract":
+                    self._record_revision_notes(
+                        self.state.extraction_critic.blocking_issues,
+                        self.state.extraction_critic.missing_information,
+                    )
                     if self.state.extraction_restarts >= input.options.max_extraction_restarts:
-                        clarified = await self._wait_for_clarification(self.state.open_questions)
-                        if not clarified:
-                            if self.state.canceled:
-                                return self._result_from_state(
-                                    status="cancelled",
-                                    extra_warning=self.state.cancel_reason or "Submission canceled.",
-                                )
+                        clarification_outcome = await self._wait_for_clarification(
+                            self.state.open_questions
+                        )
+                        if clarification_outcome == "force_finalize":
+                            return await self._force_finalize(input)
+                        if clarification_outcome == "canceled":
+                            return self._result_from_state(
+                                status="cancelled",
+                                extra_warning=self.state.cancel_reason or "Submission canceled.",
+                            )
+                        if clarification_outcome == "timeout":
                             return self._result_from_state(
                                 status="needs_clarification",
                                 extra_warning="Timed out waiting for clarification.",
                             )
                     else:
                         self.state.extraction_restarts += 1
-                    self.state.restart_point = "acquire"
+                    self.state.restart_point = "extract"
+                    self._prepare_restart("extract")
                     await self._advance_iteration(input)
                     continue
 
                 if self.state.extraction_critic.recommended_action == "ask_human":
-                    clarified = await self._wait_for_clarification(self.state.open_questions)
-                    if not clarified:
-                        if self.state.canceled:
-                            return self._result_from_state(
-                                status="cancelled",
-                                extra_warning=self.state.cancel_reason or "Submission canceled.",
-                            )
+                    clarification_outcome = await self._wait_for_clarification(
+                        self.state.open_questions
+                    )
+                    if clarification_outcome == "force_finalize":
+                        return await self._force_finalize(input)
+                    if clarification_outcome == "canceled":
+                        return self._result_from_state(
+                            status="cancelled",
+                            extra_warning=self.state.cancel_reason or "Submission canceled.",
+                        )
+                    if clarification_outcome == "timeout":
                         return self._result_from_state(
                             status="needs_clarification",
                             extra_warning="Timed out waiting for clarification.",
                         )
-                    self.state.restart_point = "acquire"
+                    self.state.restart_point = "extract"
+                    self._prepare_restart("extract")
                     await self._advance_iteration(input)
                     continue
 
                 self.state.phase = "draft"
-                self.state.draft = await self._execute_stage_child(
-                    DraftSpecWorkflow.run,
+                self.state.draft = await self._execute_stage_activity(
+                    run_draft_spec,
                     DraftSpecInput(
                         job_id=input.job_id,
                         extraction=self.state.extraction,
                         intent=self.state.intent,
+                        clarifications=self.state.clarifications,
+                        revision_notes=self.state.revision_notes,
+                        previous_draft=self.state.previous_draft,
+                        previous_best_practices_review=self.state.previous_best_practices_review,
                     ),
                     "draft",
                 )
+                self._mark_clarifications_applied()
+                self.state.revision_notes = []
+                self.state.previous_draft = None
+                self.state.previous_best_practices_review = None
                 if self.state.draft.markdown_spec_uri:
                     self.state.artifact_uris["draft_markdown"] = self.state.draft.markdown_spec_uri
                 if self.state.draft.structured_spec_uri:
@@ -533,23 +694,24 @@ class SpecBuilderWorkflow:
                 )
 
                 self.state.phase = "best_practices_review"
-                self.state.best_practices_review = await self._execute_stage_child(
-                    TemporalBestPracticesReviewWorkflow.run,
+                self.state.best_practices_review = await self._execute_best_practices_review(
                     TemporalBestPracticesReviewInput(
                         job_id=input.job_id,
                         draft=self.state.draft,
                         corpus_uri=input.options.best_practices_corpus_uri,
                     ),
-                    "best-practices-review",
                 )
                 if self.state.best_practices_review.artifact_uri:
                     self.state.artifact_uris["best_practices_review"] = (
                         self.state.best_practices_review.artifact_uri
                     )
 
+                if self._has_force_finalize_request():
+                    return await self._force_finalize(input)
+
                 self.state.phase = "supervisor"
-                self.state.supervisor_decision = await self._execute_stage_child(
-                    SupervisorDecisionWorkflow.run,
+                self.state.supervisor_decision = await self._execute_stage_activity(
+                    run_supervisor_decision,
                     SupervisorDecisionInput(
                         job_id=input.job_id,
                         extraction_critic=self.state.extraction_critic,
@@ -564,11 +726,28 @@ class SpecBuilderWorkflow:
                         self.state.supervisor_decision.artifact_uri
                     )
 
+                if self._has_force_finalize_request():
+                    return await self._force_finalize(input)
+
+                if self._should_auto_accept_supervisor_decision():
+                    self.state.supervisor_decision = self.state.supervisor_decision.model_copy(
+                        update={
+                            "action": "accept",
+                            "reason": (
+                                self.state.supervisor_decision.reason
+                                or "No high-severity best-practices issues remain after review."
+                            ),
+                            "questions": [],
+                        }
+                    )
+
                 if self.state.supervisor_decision.action == "accept":
                     if input.options.require_human_approval:
                         approval_outcome = await self._wait_for_approval()
                         if approval_outcome == "approved":
                             return await self._complete(input)
+                        if approval_outcome == "force_finalize":
+                            return await self._force_finalize(input)
                         if approval_outcome == "timeout":
                             return self._result_from_state(
                                 status="needs_clarification",
@@ -587,12 +766,19 @@ class SpecBuilderWorkflow:
                                 self.state.open_questions,
                                 [payload.reason],
                             )
+                            self._record_revision_notes([payload.reason])
                             if payload.restart_point == "acquire":
                                 self.state.extraction_restarts += 1
                                 self.state.restart_point = "acquire"
+                                self._prepare_restart("acquire")
+                            elif payload.restart_point == "extract":
+                                self.state.extraction_restarts += 1
+                                self.state.restart_point = "extract"
+                                self._prepare_restart("extract")
                             else:
                                 self.state.draft_restarts += 1
                                 self.state.restart_point = "draft"
+                                self._prepare_restart("draft")
                             await self._advance_iteration(input)
                             continue
                     else:
@@ -600,65 +786,77 @@ class SpecBuilderWorkflow:
 
                 if self.state.supervisor_decision.action == "revise_from_extraction":
                     reason = self.state.supervisor_decision.reason or "Supervisor requested re-extraction."
+                    self._record_revision_notes([reason])
                     if self.state.extraction_restarts >= input.options.max_extraction_restarts:
-                        clarified = await self._wait_for_clarification([reason])
-                        if not clarified:
-                            if self.state.canceled:
-                                return self._result_from_state(
-                                    status="cancelled",
-                                    extra_warning=self.state.cancel_reason or "Submission canceled.",
-                                )
+                        clarification_outcome = await self._wait_for_clarification([reason])
+                        if clarification_outcome == "force_finalize":
+                            return await self._force_finalize(input)
+                        if clarification_outcome == "canceled":
+                            return self._result_from_state(
+                                status="cancelled",
+                                extra_warning=self.state.cancel_reason or "Submission canceled.",
+                            )
+                        if clarification_outcome == "timeout":
                             return self._result_from_state(
                                 status="needs_clarification",
                                 extra_warning="Timed out waiting for clarification.",
                             )
                     else:
                         self.state.extraction_restarts += 1
-                    self.state.restart_point = "acquire"
+                    self.state.restart_point = "extract"
+                    self._prepare_restart("extract")
                     self.state.open_questions = self._merge_questions(
                         self.state.open_questions,
                         [reason],
                     )
                 elif self.state.supervisor_decision.action == "revise_from_draft":
                     reason = self.state.supervisor_decision.reason or "Supervisor requested a draft revision."
+                    self._record_revision_notes([reason])
                     if self.state.draft_restarts >= input.options.max_draft_restarts:
-                        clarified = await self._wait_for_clarification([reason])
-                        if not clarified:
-                            if self.state.canceled:
-                                return self._result_from_state(
-                                    status="cancelled",
-                                    extra_warning=self.state.cancel_reason or "Submission canceled.",
-                                )
+                        clarification_outcome = await self._wait_for_clarification([reason])
+                        if clarification_outcome == "force_finalize":
+                            return await self._force_finalize(input)
+                        if clarification_outcome == "canceled":
+                            return self._result_from_state(
+                                status="cancelled",
+                                extra_warning=self.state.cancel_reason or "Submission canceled.",
+                            )
+                        if clarification_outcome == "timeout":
                             return self._result_from_state(
                                 status="needs_clarification",
                                 extra_warning="Timed out waiting for clarification.",
                             )
-                        self.state.restart_point = "acquire"
+                        self.state.restart_point = "draft"
+                        self._prepare_restart("draft")
                     else:
                         self.state.draft_restarts += 1
                         self.state.restart_point = "draft"
+                        self._prepare_restart("draft")
                     self.state.open_questions = self._merge_questions(
                         self.state.open_questions,
                         [reason],
                     )
                 elif self.state.supervisor_decision.action == "ask_human":
-                    clarified = await self._wait_for_clarification(
+                    clarification_outcome = await self._wait_for_clarification(
                         self._merge_questions(
                             self.state.open_questions,
                             self.state.supervisor_decision.questions,
                         )
                     )
-                    if not clarified:
-                        if self.state.canceled:
-                            return self._result_from_state(
-                                status="cancelled",
-                                extra_warning=self.state.cancel_reason or "Submission canceled.",
-                            )
+                    if clarification_outcome == "force_finalize":
+                        return await self._force_finalize(input)
+                    if clarification_outcome == "canceled":
+                        return self._result_from_state(
+                            status="cancelled",
+                            extra_warning=self.state.cancel_reason or "Submission canceled.",
+                        )
+                    if clarification_outcome == "timeout":
                         return self._result_from_state(
                             status="needs_clarification",
                             extra_warning="Timed out waiting for clarification.",
                         )
-                    self.state.restart_point = "acquire"
+                    self.state.restart_point = "draft"
+                    self._prepare_restart("draft")
 
                 await self._advance_iteration(input)
 

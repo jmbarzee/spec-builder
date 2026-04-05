@@ -24,6 +24,23 @@ def _json_payload(value: Any) -> str:
     raise TypeError(f"Unsupported prompt payload type: {type(value)!r}")
 
 
+def _bullet_list(values: list[str]) -> str:
+    """Render a prompt-friendly bullet list."""
+    if not values:
+        return "- none"
+    return "\n".join(f"- {value}" for value in values if value) or "- none"
+
+
+def _clarification_lines(clarifications: list[ClarificationRecord]) -> str:
+    """Render clarifications for prompt context."""
+    rendered = [
+        f"- clarification-{entry.request_id}: {entry.clarification}"
+        for entry in clarifications
+        if entry.clarification
+    ]
+    return "\n".join(rendered) or "- none"
+
+
 def build_acquisition_system_instruction() -> str:
     """Return the acquisition stage system instruction."""
     return (
@@ -39,11 +56,7 @@ def build_acquisition_prompt(
     clarifications: list[ClarificationRecord],
 ) -> str:
     """Return the acquisition prompt for one artifact."""
-    clarification_text = "\n".join(
-        f"- {entry.clarification}" for entry in clarifications if entry.clarification
-    )
-    if not clarification_text:
-        clarification_text = "- none"
+    clarification_text = _clarification_lines(clarifications)
     return f"""
 Normalize the attached artifact into the `AcquiredArtifact` schema.
 
@@ -73,8 +86,16 @@ def build_structured_extraction_system_instruction() -> str:
     )
 
 
-def build_structured_extraction_prompt(acquisition: AcquisitionOutput) -> str:
+def build_structured_extraction_prompt(
+    acquisition: AcquisitionOutput,
+    clarifications: list[ClarificationRecord],
+    revision_notes: list[str],
+    previous_extraction: StructuredExtractionOutput | None,
+) -> str:
     """Return the structured extraction prompt."""
+    previous_extraction_payload = (
+        _json_payload(previous_extraction) if previous_extraction is not None else "null"
+    )
     return f"""
 Transform the acquisition bundle into `StructuredExtractionOutput`.
 
@@ -84,9 +105,20 @@ Requirements:
 - Facts that are not directly stated must be marked as `inferred`.
 - Ambiguities must be short, actionable questions or gaps.
 - Avoid generic filler like "system" or "process" unless the source explicitly uses that term.
+- When clarifications introduce new facts, use source artifact ids like `clarification-<request_id>`.
+- When a previous extraction is provided, revise it instead of discarding correct structure.
 
 Acquisition bundle:
 {_json_payload(acquisition)}
+
+Human clarifications:
+{_clarification_lines(clarifications)}
+
+Revision notes:
+{_bullet_list(revision_notes)}
+
+Previous extraction:
+{previous_extraction_payload}
 """.strip()
 
 
@@ -170,8 +202,18 @@ def build_draft_spec_system_instruction() -> str:
 def build_draft_spec_prompt(
     extraction: StructuredExtractionOutput,
     intent: IntentClassificationOutput,
+    clarifications: list[ClarificationRecord],
+    revision_notes: list[str],
+    previous_draft: DraftSpecOutput | None,
+    previous_best_practices_review: BestPracticesReviewOutput | None,
 ) -> str:
     """Return the draft prompt."""
+    previous_draft_payload = _json_payload(previous_draft) if previous_draft is not None else "null"
+    previous_review_payload = (
+        _json_payload(previous_best_practices_review)
+        if previous_best_practices_review is not None
+        else "null"
+    )
     return f"""
 Produce `DraftSpecOutput`.
 
@@ -184,12 +226,27 @@ Structured JSON requirements:
 - Fill every `StructuredSpec` field.
 - `data_contracts` must summarize key typed contracts or payloads.
 - `traceability` must map each important claim to source artifact ids and classify it as `explicit`, `inferred`, or `proposed_extension`.
+- When revising an existing draft, preserve sections that are already correct.
+- Explicitly address every high-severity issue from the previous best-practices review.
+- When clarifications introduce new facts, use source artifact ids like `clarification-<request_id>`.
 
 Extraction:
 {_json_payload(extraction)}
 
 Intent classification:
 {_json_payload(intent)}
+
+Human clarifications:
+{_clarification_lines(clarifications)}
+
+Revision notes:
+{_bullet_list(revision_notes)}
+
+Previous draft:
+{previous_draft_payload}
+
+Previous best-practices review:
+{previous_review_payload}
 """.strip()
 
 

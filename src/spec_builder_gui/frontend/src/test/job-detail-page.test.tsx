@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -59,6 +59,7 @@ function buildDetail(overrides: Partial<JobDetail> = {}): JobDetail {
     canApprove: true,
     canReject: true,
     canProvideFeedback: false,
+    canForceFinalize: false,
     canDownload: false,
     canCreateRevision: false,
     canApproveRevisionAsFinal: false,
@@ -73,6 +74,7 @@ describe("JobDetailPage", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -114,6 +116,130 @@ describe("JobDetailPage", () => {
     expect(screen.getByText("Acquire Content")).toBeInTheDocument();
   });
 
+  test("should retry detail polling after a transient load failure", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockRejectedValueOnce(new Error("Temporary detail failure"))
+      .mockResolvedValueOnce(jsonResponse(buildDetail()));
+
+    render(
+      <MemoryRouter
+        initialEntries={["/jobs/job-1"]}
+        future={{
+          v7_relativeSplatPath: true,
+          v7_startTransition: true,
+        }}
+      >
+        <Routes>
+          <Route path="/jobs/:jobId" element={<JobDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Temporary detail failure")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Studio Spec")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("should render force-finalize controls and send override review requests", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(
+          buildDetail({
+            status: "running",
+            currentPhase: "supervisor",
+            pendingHumanAction: null,
+            canApprove: false,
+            canReject: false,
+            canForceFinalize: true,
+            bestPracticesViolations: [
+              {
+                severity: "high",
+                issue: "A high-risk determinism issue remains.",
+                suggestedFix: "Move the side effect to an activity.",
+              },
+            ],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          buildDetail({
+            status: "completed",
+            currentPhase: "completed",
+            pendingHumanAction: null,
+            canApprove: false,
+            canReject: false,
+            canForceFinalize: false,
+            canDownload: true,
+            finalSpecMarkdown: "# Final\n\nAccepted with override.\n",
+            bestPracticesViolations: [
+              {
+                severity: "high",
+                issue: "A high-risk determinism issue remains.",
+                suggestedFix: "Move the side effect to an activity.",
+              },
+            ],
+          }),
+        ),
+      );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter
+        initialEntries={["/jobs/job-1"]}
+        future={{
+          v7_relativeSplatPath: true,
+          v7_startTransition: true,
+        }}
+      >
+        <Routes>
+          <Route path="/jobs/:jobId" element={<JobDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /force finalize/i })).toBeInTheDocument();
+    });
+
+    await user.type(
+      screen.getByRole("textbox"),
+      "Accept the current draft and document the known policy risk.",
+    );
+    await user.click(screen.getByRole("button", { name: /force finalize/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/jobs/job-1/review",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/jobs/job-1/review",
+      expect.objectContaining({
+        body: JSON.stringify({
+          action: "force_finalize",
+          text: "Accept the current draft and document the known policy risk.",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
   test("should show the revision launcher for a completed job", async () => {
     vi.mocked(fetch).mockResolvedValue(
       jsonResponse(
@@ -124,6 +250,7 @@ describe("JobDetailPage", () => {
           finalSpecMarkdown: "# Final\n\nReady.\n",
           canApprove: false,
           canReject: false,
+          canForceFinalize: false,
           canCreateRevision: true,
           canApproveRevisionAsFinal: false,
           canDownload: true,
@@ -167,6 +294,7 @@ describe("JobDetailPage", () => {
             finalSpecMarkdown: "# Final Revision\n\nReady.\n",
             canApprove: false,
             canReject: false,
+            canForceFinalize: false,
             canCreateRevision: true,
             canApproveRevisionAsFinal: true,
             canDownload: false,
@@ -183,6 +311,7 @@ describe("JobDetailPage", () => {
             finalSpecMarkdown: "# Final Revision\n\nReady.\n",
             canApprove: false,
             canReject: false,
+            canForceFinalize: false,
             canCreateRevision: true,
             canApproveRevisionAsFinal: false,
             canDownload: true,

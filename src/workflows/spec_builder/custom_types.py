@@ -11,7 +11,7 @@ SPEC_BUILDER_TASK_QUEUE = "spec-builder-task-queue"
 
 ArtifactType = Literal["document", "diagram", "image", "slides", "markdown", "notes"]
 OutputTarget = Literal["markdown_spec", "structured_json"]
-RestartPoint = Literal["acquire", "draft", "human_pause"]
+RestartPoint = Literal["acquire", "extract", "draft", "human_pause"]
 WorkflowPhase = Literal[
     "acquire",
     "extract",
@@ -86,13 +86,6 @@ class ArtifactInput(StrictModel):
     title: str | None = None
 
 
-class ContinueAsNewThreshold(StrictModel):
-    """Thresholds that trigger continue-as-new."""
-
-    max_history_length: int | None = 1_500
-    max_iterations_per_run: int | None = 2
-
-
 class SpecBuilderOptions(StrictModel):
     """Workflow runtime options."""
 
@@ -101,9 +94,6 @@ class SpecBuilderOptions(StrictModel):
     max_draft_restarts: int = Field(default=2, ge=0)
     require_human_approval: bool = False
     best_practices_corpus_uri: str | None = None
-    continue_as_new_threshold: ContinueAsNewThreshold = Field(
-        default_factory=ContinueAsNewThreshold
-    )
 
 
 class VisualElement(StrictModel):
@@ -336,6 +326,10 @@ class SpecBuilderState(StrictModel):
     draft: DraftSpecOutput | None = None
     best_practices_review: BestPracticesReviewOutput | None = None
     supervisor_decision: SupervisorDecision | None = None
+    previous_extraction: StructuredExtractionOutput | None = None
+    previous_draft: DraftSpecOutput | None = None
+    previous_best_practices_review: BestPracticesReviewOutput | None = None
+    revision_notes: list[str] = Field(default_factory=list)
     clarifications: list[ClarificationRecord] = Field(default_factory=list)
     last_applied_clarification_count: int = 0
     open_questions: list[str] = Field(default_factory=list)
@@ -343,6 +337,8 @@ class SpecBuilderState(StrictModel):
     artifact_uris: dict[str, str] = Field(default_factory=dict)
     processed_request_ids: list[str] = Field(default_factory=list)
     approval_note: str | None = None
+    force_finalize_requested: bool = False
+    force_finalize_reason: str | None = None
     canceled: bool = False
     cancel_reason: str | None = None
     final_result: SpecBuilderResult | None = None
@@ -367,6 +363,15 @@ class SpecBuilderStatus(StrictModel):
     final_status: FinalStatus | None = None
 
 
+class SpecBuilderLiveState(StrictModel):
+    """Atomic live snapshot returned by the workflow for GUI polling."""
+
+    status: SpecBuilderStatus
+    current_draft: DraftSpecOutput | None = None
+    best_practices_violations: list[BestPracticesViolation] = Field(default_factory=list)
+    traceability_summary: TraceabilitySummary | None = None
+
+
 class SubmitClarificationInput(StrictModel):
     """Signal payload for clarification."""
 
@@ -382,12 +387,19 @@ class ApproveDraftInput(StrictModel):
     reviewer_note: str | None = None
 
 
+class ForceFinalizeDraftInput(StrictModel):
+    """Signal payload for force-finalizing the current reviewed draft."""
+
+    request_id: str
+    reason: str
+
+
 class RejectDraftInput(StrictModel):
     """Signal payload for human rejection."""
 
     request_id: str
     reason: str
-    restart_point: Literal["draft", "acquire"] = "draft"
+    restart_point: Literal["draft", "extract", "acquire"] = "draft"
 
 
 class CancelJobInput(StrictModel):
@@ -398,7 +410,7 @@ class CancelJobInput(StrictModel):
 
 
 class AcquireContentInput(StrictModel):
-    """Child workflow input for stage 1."""
+    """Stage 1 activity input."""
 
     job_id: str
     artifacts: list[ArtifactInput]
@@ -406,14 +418,17 @@ class AcquireContentInput(StrictModel):
 
 
 class StructuredExtractionInput(StrictModel):
-    """Child workflow input for stage 2."""
+    """Stage 2 activity input."""
 
     job_id: str
     acquisition: AcquisitionOutput
+    clarifications: list[ClarificationRecord] = Field(default_factory=list)
+    revision_notes: list[str] = Field(default_factory=list)
+    previous_extraction: StructuredExtractionOutput | None = None
 
 
 class IntentClassificationInput(StrictModel):
-    """Child workflow input for stage 3."""
+    """Stage 3 activity input."""
 
     job_id: str
     extraction: StructuredExtractionOutput
@@ -421,7 +436,7 @@ class IntentClassificationInput(StrictModel):
 
 
 class ExtractionCriticInput(StrictModel):
-    """Child workflow input for stage 4."""
+    """Stage 4 activity input."""
 
     job_id: str
     extraction: StructuredExtractionOutput
@@ -429,15 +444,19 @@ class ExtractionCriticInput(StrictModel):
 
 
 class DraftSpecInput(StrictModel):
-    """Child workflow input for stage 5."""
+    """Stage 5 activity input."""
 
     job_id: str
     extraction: StructuredExtractionOutput
     intent: IntentClassificationOutput
+    clarifications: list[ClarificationRecord] = Field(default_factory=list)
+    revision_notes: list[str] = Field(default_factory=list)
+    previous_draft: DraftSpecOutput | None = None
+    previous_best_practices_review: BestPracticesReviewOutput | None = None
 
 
 class TemporalBestPracticesReviewInput(StrictModel):
-    """Child workflow input for stage 6."""
+    """Retained child workflow input for stage 6."""
 
     job_id: str
     draft: DraftSpecOutput
@@ -453,7 +472,7 @@ class RunBestPracticesReviewActivityInput(StrictModel):
 
 
 class SupervisorDecisionInput(StrictModel):
-    """Child workflow input for stage 7."""
+    """Stage 7 activity input."""
 
     job_id: str
     extraction_critic: CriticOutput

@@ -72,7 +72,7 @@ SPEC_BUILDER_GEMINI_MAX_ATTEMPTS=3
    cd src/spec_builder_gui/frontend
    npm install
    npm run build
-   cd ../../..
+   cd ../../.   cd ../../...
    ```
 
 1. **Run the local GUI backend**
@@ -112,15 +112,15 @@ The workflow package lives in [`src/workflows/spec_builder/`](./src/workflows/sp
 
 ### Fixed Stage Pipeline
 
-The parent workflow coordinates seven fixed child workflows in this order:
+The parent workflow coordinates seven fixed stages in this order:
 
-1. `AcquireContentWorkflow`
-1. `StructuredExtractionWorkflow`
-1. `IntentClassificationWorkflow`
-1. `ExtractionCriticWorkflow`
-1. `DraftSpecWorkflow`
-1. `TemporalBestPracticesReviewWorkflow`
-1. `SupervisorDecisionWorkflow`
+1. `acquire_content` activity
+1. `run_structured_extraction` activity
+1. `run_intent_classification` activity
+1. `run_extraction_critic` activity
+1. `run_draft_spec` activity
+1. `TemporalBestPracticesReviewWorkflow` child workflow
+1. `run_supervisor_decision` activity
 
 The supervisor can:
 
@@ -129,13 +129,14 @@ The supervisor can:
 - request a restart from acquisition/extraction
 - ask for human clarification
 
-When `requireHumanApproval` is enabled, a supervisor `accept` moves the workflow into a human approval wait state until `approve_draft` or `reject_draft` is received.
+When `requireHumanApproval` is enabled, a supervisor `accept` moves the workflow into a human approval wait state until `approve_draft` or `reject_draft` is received. The GUI can also send `force_finalize_draft` to finalize the current reviewed draft with an explicit human override note, even when high-severity best-practices violations are still present.
 
 ### GUI-Ready Workflow API
 
 Queries:
 
 - `get_status`
+- `get_live_state`
 - `get_current_phase`
 - `get_current_draft`
 - `get_open_questions`
@@ -146,6 +147,7 @@ Signals:
 
 - `submit_clarification`
 - `approve_draft`
+- `force_finalize_draft`
 - `reject_draft`
 - `cancel_job`
 
@@ -161,7 +163,7 @@ The GUI backend and frontend live under [`src/spec_builder_gui/`](./src/spec_bui
 - `POST /api/jobs`: create and start a `SpecBuilderWorkflow`
 - `GET /api/jobs`: list and refresh jobs
 - `GET /api/jobs/:jobId`: load job detail, current draft markdown, stage state, violations, and review actions
-- `POST /api/jobs/:jobId/review`: approve, reject, clarify, or cancel an active job
+- `POST /api/jobs/:jobId/review`: approve, reject, force-finalize, clarify, or cancel an active job
 - `POST /api/jobs/:jobId/revise`: create a linked revision job from prior output plus revision notes
 - `GET /api/jobs/:jobId/download`: download final markdown output
 - `POST /api/system/pick-output-directory`: attempt a native local directory picker on supported hosts

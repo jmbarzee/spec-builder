@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -19,6 +19,7 @@ describe("JobsPage", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -98,5 +99,55 @@ describe("JobsPage", () => {
         fetchMock.mock.calls.some(([url]) => String(url).includes("search=playlist")),
       ).toBe(true);
     });
+  });
+
+  test("should retry job polling after a transient refresh failure", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockRejectedValueOnce(new Error("Temporary list failure"))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [
+            {
+              jobId: "job-recovered",
+              workflowId: "workflow-recovered",
+              projectName: "Recovered Draft",
+              status: "running",
+              currentPhase: "draft",
+              iteration: 0,
+              createdAt: "2026-04-02T10:00:00Z",
+              updatedAt: "2026-04-02T10:01:00Z",
+            },
+          ],
+          total: 1,
+        }),
+      );
+
+    render(
+      <MemoryRouter
+        future={{
+          v7_relativeSplatPath: true,
+          v7_startTransition: true,
+        }}
+      >
+        <JobsPage />
+      </MemoryRouter>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Temporary list failure")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Recovered Draft")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

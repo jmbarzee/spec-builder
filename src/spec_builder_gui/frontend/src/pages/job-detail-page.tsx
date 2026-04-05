@@ -25,8 +25,30 @@ export function JobDetailPage() {
   useEffect(() => {
     let cancelled = false;
     let timeoutId: number | undefined;
+    let pollInFlight = false;
+
+    function clearScheduledPoll() {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    }
+
+    function schedulePoll(delay: number) {
+      if (cancelled) {
+        return;
+      }
+      clearScheduledPoll();
+      timeoutId = window.setTimeout(() => {
+        void poll();
+      }, delay);
+    }
 
     async function poll() {
+      if (!jobId || cancelled || pollInFlight) {
+        return;
+      }
+      pollInFlight = true;
       try {
         const nextDetail = await api.getJobDetail(jobId);
         if (cancelled) {
@@ -40,26 +62,33 @@ export function JobDetailPage() {
           nextDetail.status === "waiting_for_human"
             ? 3000
             : 15000;
-        timeoutId = window.setTimeout(() => {
-          if (document.visibilityState === "visible") {
-            void poll();
-          }
-        }, interval);
+        schedulePoll(interval);
       } catch (caughtError) {
         if (!cancelled) {
           setError(caughtError instanceof Error ? caughtError.message : "Job detail load failed.");
+          schedulePoll(3000);
         }
+      } finally {
+        pollInFlight = false;
       }
     }
 
+    function handleVisibilityChange() {
+      if (document.visibilityState !== "visible" || pollInFlight) {
+        return;
+      }
+      clearScheduledPoll();
+      void poll();
+    }
+
     if (jobId) {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
       void poll();
     }
     return () => {
       cancelled = true;
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearScheduledPoll();
     };
   }, [jobId]);
 

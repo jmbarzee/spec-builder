@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,15 +44,16 @@ from src.workflows.spec_builder.custom_types import (
     CancelJobInput,
     DraftSpecOutput,
     FinalStatus,
+    ForceFinalizeDraftInput,
     RejectDraftInput,
     SPEC_BUILDER_TASK_QUEUE,
     SpecBuilderInput,
+    SpecBuilderLiveState,
     SpecBuilderOptions,
     SpecBuilderResult,
     SpecBuilderStatus,
     SubmitClarificationInput,
     TraceabilitySummary,
-    WorkflowPhase,
 )
 from src.workflows.spec_builder.spec_builder_workflow import SpecBuilderWorkflow
 
@@ -161,6 +163,8 @@ class TemporalGateway(Protocol):
 
     async def approve(self, workflow_id: str, *, reviewer_note: str | None) -> None: ...
 
+    async def force_finalize(self, workflow_id: str, *, reason: str) -> None: ...
+
     async def reject(self, workflow_id: str, *, reason: str, restart_point: str) -> None: ...
 
     async def submit_clarification(self, workflow_id: str, *, clarification: str) -> None: ...
@@ -207,18 +211,15 @@ class TemporalSpecBuilderGateway:
         description = await handle.describe()
         workflow_status = description.raw_description.workflow_execution_info.status
         if workflow_status == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING:
-            status = await handle.query(SpecBuilderWorkflow.get_status)
-            current_draft = await handle.query(SpecBuilderWorkflow.get_current_draft)
-            best_practices_violations = await handle.query(
-                SpecBuilderWorkflow.get_best_practices_violations
+            live_state = SpecBuilderLiveState.model_validate(
+                await handle.query(SpecBuilderWorkflow.get_live_state)
             )
-            traceability_summary = await handle.query(SpecBuilderWorkflow.get_traceability_summary)
             return LiveWorkflowSnapshot(
                 workflow_status=workflow_status,
-                status=status,
-                current_draft=current_draft,
-                best_practices_violations=best_practices_violations,
-                traceability_summary=traceability_summary,
+                status=live_state.status,
+                current_draft=live_state.current_draft,
+                best_practices_violations=live_state.best_practices_violations,
+                traceability_summary=live_state.traceability_summary,
             )
         return LiveWorkflowSnapshot(
             workflow_status=workflow_status,
@@ -231,6 +232,17 @@ class TemporalSpecBuilderGateway:
         await handle.signal(
             SpecBuilderWorkflow.approve_draft,
             ApproveDraftInput(request_id=f"approve-{uuid.uuid4()}", reviewer_note=reviewer_note),
+        )
+
+    async def force_finalize(self, workflow_id: str, *, reason: str) -> None:
+        """Signal force-finalization of the current reviewed draft."""
+        handle = self.client.get_workflow_handle(workflow_id)
+        await handle.signal(
+            SpecBuilderWorkflow.force_finalize_draft,
+            ForceFinalizeDraftInput(
+                request_id=f"force-finalize-{uuid.uuid4()}",
+                reason=reason,
+            ),
         )
 
     async def reject(self, workflow_id: str, *, reason: str, restart_point: str) -> None:
@@ -271,6 +283,17 @@ class SpecBuilderGuiService:
     def __init__(self, *, job_store: GuiJobStore, temporal_gateway: TemporalGateway) -> None:
         self.job_store = job_store
         self.temporal_gateway = temporal_gateway
+
+    async def _invoke_temporal_action(
+        self,
+        description: str,
+        action: Callable[[], Awaitable[None]],
+    ) -> None:
+        try:
+            await action()
+        except Exception as exc:  # noqa: BLE001
+            message = f"Unable to {description}: {exc}"
+            raise GuiServiceError(message, status_code=409) from exc
 
     def _artifact_type_for_upload(
         self,
@@ -381,6 +404,9 @@ class SpecBuilderGuiService:
 
     def _record_to_detail(self, record: StoredJobRecord) -> JobDetail:
         has_markdown = (record.final_spec_markdown or record.current_draft_markdown) is not None
+        has_high_risk_violations = any(
+            violation.severity == "high" for violation in record.best_practices_violations
+        )
         can_approve = (
             record.status == "waiting_for_human"
             and record.pending_human_action == "approval"
@@ -390,6 +416,11 @@ class SpecBuilderGuiService:
         can_provide_feedback = (
             record.status == "waiting_for_human"
             and record.pending_human_action == "clarification"
+        )
+        can_force_finalize = (
+            record.status in ACTIVE_JOB_STATUSES
+            and record.current_draft_markdown is not None
+            and has_high_risk_violations
         )
         can_download = record.status in CLOSED_JOB_STATUSES and self._download_artifact_uri(record) is not None
         can_create_revision = (
@@ -428,6 +459,7 @@ class SpecBuilderGuiService:
             can_approve=can_approve,
             can_reject=can_reject,
             can_provide_feedback=can_provide_feedback,
+            can_force_finalize=can_force_finalize,
             can_download=can_download,
             can_create_revision=can_create_revision,
             can_approve_revision_as_final=can_approve_revision_as_final,
@@ -644,7 +676,11 @@ class SpecBuilderGuiService:
         if record is None:
             raise GuiServiceError("Job not found.", status_code=404)
         if record.status in ACTIVE_JOB_STATUSES:
-            record = await self.refresh_job(job_id)
+            try:
+                record = await self.refresh_job(job_id)
+            except Exception as exc:  # noqa: BLE001
+                record.last_error = str(exc)
+                self.job_store.save_job(record)
         return self._record_to_detail(record)
 
     def _append_review_entry(
@@ -677,17 +713,46 @@ class SpecBuilderGuiService:
         if request.action == "approve":
             if record.pending_human_action != "approval":
                 raise GuiServiceError("This job is not waiting for approval.")
-            await self.temporal_gateway.approve(record.workflow_id, reviewer_note=request.text)
+            await self._invoke_temporal_action(
+                "approve the current draft",
+                lambda: self.temporal_gateway.approve(
+                    record.workflow_id,
+                    reviewer_note=request.text,
+                ),
+            )
             self._append_review_entry(record, kind="approval", text=request.text)
+        elif request.action == "force_finalize":
+            if record.current_draft_markdown is None:
+                raise GuiServiceError("This job does not have a draft available to finalize.")
+            if not any(
+                violation.severity == "high" for violation in record.best_practices_violations
+            ):
+                raise GuiServiceError(
+                    "Force-finalize is only available when high-risk policy violations are present."
+                )
+            if not request.text or not request.text.strip():
+                raise GuiServiceError("Force-finalize requires a written justification.")
+            reason = request.text.strip()
+            await self._invoke_temporal_action(
+                "force-finalize the current draft",
+                lambda: self.temporal_gateway.force_finalize(
+                    record.workflow_id,
+                    reason=reason,
+                ),
+            )
+            self._append_review_entry(record, kind="force_finalize", text=reason)
         elif request.action == "reject":
             if record.pending_human_action != "approval":
                 raise GuiServiceError("This job is not waiting for approval.")
             if not request.text or not request.text.strip():
                 raise GuiServiceError("Rejection feedback is required.")
-            await self.temporal_gateway.reject(
-                record.workflow_id,
-                reason=request.text.strip(),
-                restart_point="draft",
+            await self._invoke_temporal_action(
+                "reject the current draft",
+                lambda: self.temporal_gateway.reject(
+                    record.workflow_id,
+                    reason=request.text.strip(),
+                    restart_point="draft",
+                ),
             )
             self._append_review_entry(record, kind="rejection", text=request.text.strip())
         elif request.action == "feedback":
@@ -695,14 +760,23 @@ class SpecBuilderGuiService:
                 raise GuiServiceError("This job is not waiting for clarification feedback.")
             if not request.text or not request.text.strip():
                 raise GuiServiceError("Feedback text is required.")
-            await self.temporal_gateway.submit_clarification(
-                record.workflow_id,
-                clarification=request.text.strip(),
+            await self._invoke_temporal_action(
+                "submit clarification feedback",
+                lambda: self.temporal_gateway.submit_clarification(
+                    record.workflow_id,
+                    clarification=request.text.strip(),
+                ),
             )
             self._append_review_entry(record, kind="feedback", text=request.text.strip())
         else:
             reason = request.text.strip() if request.text else "User canceled from GUI."
-            await self.temporal_gateway.cancel(record.workflow_id, reason=reason)
+            await self._invoke_temporal_action(
+                "cancel the workflow",
+                lambda: self.temporal_gateway.cancel(
+                    record.workflow_id,
+                    reason=reason,
+                ),
+            )
             self._append_review_entry(record, kind="cancel", text=reason)
 
         self.job_store.save_job(record)
