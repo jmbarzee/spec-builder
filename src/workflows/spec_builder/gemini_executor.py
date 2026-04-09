@@ -15,6 +15,8 @@ from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
+# Gemini rejects parts of full Pydantic JSON Schema, so structured generation must project schemas
+# down to the subset the API currently accepts.
 SUPPORTED_JSON_SCHEMA_KEYS = frozenset(
     {
         "$id",
@@ -65,6 +67,8 @@ class GeminiExecutor:
     @staticmethod
     def _candidate_dotenv_paths() -> list[Path]:
         """Return likely `.env` paths from the cwd and this module's ancestry."""
+        # Tests and CLI entry points do not always run from the repo root, so we probe both the
+        # current working tree and this module's parent chain for a project-local `.env`.
         candidates: list[Path] = []
         seen: set[Path] = set()
         roots = [Path.cwd().resolve(), Path(__file__).resolve().parent]
@@ -97,6 +101,8 @@ class GeminiExecutor:
         request_timeout_seconds: int | None = None,
         max_attempts: int | None = None,
     ) -> None:
+        # The executor allows direct client injection for tests, but still loads env-derived
+        # defaults so production activities can construct it with zero explicit configuration.
         self._dotenv_path = self._load_project_dotenv()
         self._client = client
         self._api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -106,6 +112,8 @@ class GeminiExecutor:
         self._max_attempts = max_attempts or int(os.getenv("SPEC_BUILDER_GEMINI_MAX_ATTEMPTS", "3"))
 
     def _http_options(self) -> types.HttpOptions:
+        # Gemini SDK retries are disabled here because the executor already applies a small,
+        # stage-level retry loop with clearer Temporal-friendly error reporting.
         return types.HttpOptions(
             timeout=self._request_timeout_seconds * 1000,
             retry_options=types.HttpRetryOptions(attempts=1),
@@ -115,6 +123,8 @@ class GeminiExecutor:
         if self._client is not None:
             return self._client
         if not self._api_key:
+            # Surface dotenv discovery details in the error so local setup failures are diagnosable
+            # from Temporal activity logs without having to inspect process environment manually.
             dotenv_detail = (
                 f" Loaded .env from {self._dotenv_path}."
                 if self._dotenv_path is not None
@@ -149,6 +159,8 @@ class GeminiExecutor:
             return schema
 
         if "$ref" in schema:
+            # Gemini can follow schema references, but only if we drop sibling keys that Pydantic
+            # may include alongside `$ref`.
             return {
                 key: GeminiExecutor._sanitize_response_json_schema(value)
                 for key, value in schema.items()
@@ -179,6 +191,8 @@ class GeminiExecutor:
             sanitized[key] = value
 
         if property_names and "propertyOrdering" not in sanitized:
+            # Preserve declared field order so Gemini's JSON output is more predictable and easier
+            # to diff in saved artifacts and tests.
             sanitized["propertyOrdering"] = property_names
         return sanitized
 
@@ -212,6 +226,8 @@ class GeminiExecutor:
         """Run a structured generation request and parse it into `response_model`."""
         client = self._client_or_raise()
         model = self.resolve_generation_model(stage_name)
+        # The prompt is always the first content part. Binary inputs are appended afterward so the
+        # caller can keep prompt construction separate from attachment loading.
         content_parts: list[str | types.Part] = [prompt]
         for attachment in attachments or []:
             content_parts.append(
@@ -222,6 +238,8 @@ class GeminiExecutor:
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             response_mime_type="application/json",
+            # `response_json_schema` is used instead of `response_schema` because the sanitized dict
+            # form is more stable across Pydantic models and Gemini SDK versions.
             response_json_schema=self._build_response_json_schema(response_model),
         )
 
@@ -234,10 +252,15 @@ class GeminiExecutor:
                     config=config,
                 )
                 if response.parsed is not None:
+                    # Prefer the SDK's parsed payload when available, but still validate it through
+                    # Pydantic so callers get the exact response model type they requested.
                     if isinstance(response.parsed, response_model):
                         return response.parsed
                     return response_model.model_validate(response.parsed)
                 if response.text:
+                    # Some SDK responses omit `parsed` but still include raw JSON text.
+                    # Keep that fallback so structured generation remains robust across model/SDK
+                    # variations.
                     parsed_payload = json.loads(response.text)
                     return response_model.model_validate(parsed_payload)
                 raise GeminiExecutorError("Gemini returned no parsed payload or text.")
@@ -245,6 +268,8 @@ class GeminiExecutor:
                 last_error = exc
                 if attempt == self._max_attempts:
                     break
+                # Simple bounded backoff smooths over transient API failures without stretching
+                # Temporal activity duration too aggressively.
                 time.sleep(min(attempt, 3))
         raise GeminiExecutorError(
             f"Gemini structured generation failed for stage '{stage_name}': "
@@ -267,6 +292,8 @@ class GeminiExecutor:
         vectors: list[list[float]] = []
 
         try:
+            # Gemini embedding APIs accept bounded batch sizes, so the executor centralizes batching
+            # instead of forcing every retrieval caller to know the transport limit.
             for batch_start in range(0, len(texts), self.MAX_EMBED_BATCH_SIZE):
                 batch = texts[batch_start : batch_start + self.MAX_EMBED_BATCH_SIZE]
                 response = client.models.embed_content(

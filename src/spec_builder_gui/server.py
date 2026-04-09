@@ -1,13 +1,9 @@
 """Local aiohttp backend for the spec builder GUI."""
-
 from __future__ import annotations
-
 import asyncio
 from pathlib import Path
 from typing import Any
-
 from aiohttp import web
-
 from src.spec_builder_gui.api_models import (
     CreateJobRequest,
     CreateRevisionRequest,
@@ -206,7 +202,7 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 8080)
     await site.start()
-    print("Spec Builder GUI available at http://127.0.0.1:8080")  # noqa: T201
+    print("Spec Builder GUI available at http://127.0.0.1:8080")
     try:
         while True:
             await asyncio.sleep(3600)
@@ -214,5 +210,5 @@ async def main() -> None:
         await runner.cleanup()
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     asyncio.run(main())

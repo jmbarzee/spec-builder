@@ -32,17 +32,13 @@ from src.workflows.spec_builder.custom_types import (
     IntentClassificationOutput,
     PersistFinalOutputsInput,
     PersistFinalOutputsOutput,
-    ReviewSeverity,
     RunBestPracticesReviewActivityInput,
-    SpecBuilderResult,
     StrictModel,
     StructuredExtractionInput,
     StructuredExtractionOutput,
-    StructuredSpec,
     SupervisorDecision,
     SupervisorDecisionInput,
     TemporalBestPracticesReviewInput,
-    TraceabilityEntry,
     TraceabilitySummary,
 )
 from src.workflows.spec_builder.gemini_executor import GeminiAttachment, GeminiExecutor
@@ -66,58 +62,55 @@ from src.workflows.spec_builder.prompts.activity_prompts import (
 RUNTIME_ROOT = Path(".spec_builder_runtime")
 DEFAULT_CORPUS_PATH = Path("src/resources/sa_workflow_design_best_practices_critic_guide.md")
 
-
 class ReviewAssessment(StrictModel):
     """Internal response shape for the review model."""
 
     violations: list[BestPracticesViolation] = Field(default_factory=list)
     verdict: BestPracticesVerdict
 
-
 def _runtime_dir(job_id: str) -> Path:
+    # Each activity writes deterministic-by-name artifacts under one job-scoped runtime tree so the
+    # workflow and GUI can refer back to intermediate files by URI.
     path = RUNTIME_ROOT / job_id
     path.mkdir(parents=True, exist_ok=True)
     return path
-
 
 def _stage_dir(job_id: str, name: str) -> Path:
     path = _runtime_dir(job_id) / name
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-
 def _uri_for_path(path: Path) -> str:
     return path.resolve().as_uri()
 
-
 def _path_from_uri(uri: str) -> Path:
+    # Activities intentionally only accept local paths today. That keeps acquisition and final
+    # persistence side effects explicit and easy to reason about in tests.
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         target = unquote(parsed.path) if parsed.scheme == "file" else uri
         return Path(target).expanduser().resolve()
     raise ValueError(f"Only local file paths are supported. Received: {uri}")
 
-
 def _slug(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
     return normalized or "artifact"
 
-
 def _json_write(path: Path, payload: object) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
+        # Prefer model-aware serialization so aliased Pydantic fields survive exactly as downstream
+        # prompts and clients expect them.
         if hasattr(payload, "model_dump"):
             json.dump(payload.model_dump(by_alias=True), handle, indent=2)
         else:
             json.dump(payload, handle, indent=2)
     return _uri_for_path(path)
 
-
 def _text_write(path: Path, text: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return _uri_for_path(path)
-
 
 def _dedupe_strings(values: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -128,14 +121,14 @@ def _dedupe_strings(values: list[str]) -> list[str]:
             deduped.append(value)
     return deduped
 
-
 def _checksum_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
 
 def _looks_like_text(data: bytes) -> bool:
     if not data:
         return True
+    # This is a cheap guard, not a MIME detector. We only need to know whether local decoding is
+    # likely safe before falling back to multimodal extraction.
     sample = data[:4_096]
     if b"\x00" in sample:
         return False
@@ -144,13 +137,11 @@ def _looks_like_text(data: bytes) -> bool:
     )
     return printable / len(sample) > 0.85
 
-
 def _detect_mime_type(artifact: ArtifactInput, path: Path) -> str:
     if artifact.mime_type:
         return artifact.mime_type
     guessed, _ = mimetypes.guess_type(path.name)
     return guessed or "application/octet-stream"
-
 
 def _read_text_if_available(path: Path) -> str | None:
     data = path.read_bytes()
@@ -158,14 +149,12 @@ def _read_text_if_available(path: Path) -> str | None:
         return None
     return data.decode("utf-8", errors="replace").strip()
 
-
 def _is_visual_or_binary(artifact: ArtifactInput, mime_type: str) -> bool:
     return (
         artifact.type in {"diagram", "image", "slides"}
         or mime_type.startswith("image/")
         or mime_type == "application/pdf"
     )
-
 
 def _build_acquired_artifact_from_text(
     artifact: ArtifactInput,
@@ -181,13 +170,14 @@ def _build_acquired_artifact_from_text(
         source_uri=source_uri,
     )
 
-
 def _merge_acquired_artifacts(
     artifact: ArtifactInput,
     source_uri: str,
     local_result: AcquiredArtifact | None,
     gemini_result: AcquiredArtifact | None,
 ) -> AcquiredArtifact:
+    # Local text extraction is fast and lossless for readable files. Gemini adds OCR / multimodal
+    # coverage for PDFs and images. We preserve both when available instead of choosing one winner.
     extracted_text_parts = [
         value
         for value in [
@@ -218,10 +208,8 @@ def _merge_acquired_artifacts(
         source_uri=source_uri,
     )
 
-
 def _load_executor() -> GeminiExecutor:
     return GeminiExecutor()
-
 
 def _extract_with_gemini(
     *,
@@ -233,6 +221,9 @@ def _extract_with_gemini(
     mime_type = _detect_mime_type(artifact, raw_path)
     acquired = executor.generate_structured(
         stage_name="acquire_content",
+        # Clarifications are threaded into acquisition so the model can reinterpret the same
+        # source material with the user's added context instead of treating clarifications as a
+        # later patch.
         prompt=build_acquisition_prompt(artifact, clarifications),
         response_model=AcquiredArtifact,
         system_instruction=build_acquisition_system_instruction(),
@@ -253,7 +244,6 @@ def _extract_with_gemini(
         }
     )
 
-
 def _persist_normalized_text(job_id: str, artifact: AcquiredArtifact) -> AcquiredArtifact:
     if not artifact.extracted_text:
         return artifact
@@ -262,7 +252,6 @@ def _persist_normalized_text(job_id: str, artifact: AcquiredArtifact) -> Acquire
     normalized_uri = _text_write(normalized_path, artifact.extracted_text)
     return artifact.model_copy(update={"normalized_text_uri": normalized_uri})
 
-
 def _persist_clarification_note(job_id: str, clarification: ClarificationRecord) -> ClarificationRecord:
     clarifications_dir = _stage_dir(job_id, "clarifications")
     note_path = clarifications_dir / f"clarification-{_slug(clarification.request_id)}.md"
@@ -270,8 +259,9 @@ def _persist_clarification_note(job_id: str, clarification: ClarificationRecord)
     note_uri = _text_write(note_path, note_text)
     return clarification.model_copy(update={"note_uri": note_uri})
 
-
 def _clarification_artifact(clarification: ClarificationRecord) -> AcquiredArtifact:
+    # Clarifications are promoted into pseudo-artifacts so later stages can consume them through the
+    # same artifact-oriented prompts they already use for uploaded source material.
     return AcquiredArtifact(
         artifact_id=f"clarification-{clarification.request_id}",
         type="notes",
@@ -282,8 +272,9 @@ def _clarification_artifact(clarification: ClarificationRecord) -> AcquiredArtif
         normalized_text_uri=clarification.note_uri,
     )
 
-
 def _render_traceability_summary(draft: DraftSpecOutput) -> TraceabilitySummary:
+    # The final summary highlights claims/questions still lacking an explicit traceability mapping,
+    # which is easier for the GUI to display than scanning the full structured draft payload.
     uncovered_claims = [
         question
         for question in draft.open_questions
@@ -316,6 +307,8 @@ def _should_auto_accept(
 
 
 def _chunk_markdown_by_heading(text: str) -> list[tuple[str, str]]:
+    # Passage retrieval works better when embeddings respect section boundaries instead of embedding
+    # one monolithic corpus document.
     chunks: list[tuple[str, str]] = []
     current_heading = "Introduction"
     current_lines: list[str] = []
@@ -359,10 +352,14 @@ async def acquire_content(input: AcquireContentInput) -> AcquisitionOutput:
     raw_dir = _stage_dir(input.job_id, "raw")
     acquisition_dir = _stage_dir(input.job_id, "acquisition")
 
+    # Clarifications are persisted immediately so subsequent activities can refer to durable note
+    # URIs instead of only in-memory signal payloads.
     clarification_records = [
         _persist_clarification_note(input.job_id, clarification) for clarification in input.clarifications
     ]
 
+    # Uploaded artifacts and clarification-attached artifacts share one deduped map keyed by
+    # `artifact_id` so the workflow sees a single normalized acquisition bundle.
     artifact_map: dict[str, ArtifactInput] = {artifact.artifact_id: artifact for artifact in input.artifacts}
     for clarification in clarification_records:
         for artifact in clarification.artifact_refs:
@@ -377,6 +374,8 @@ async def acquire_content(input: AcquireContentInput) -> AcquisitionOutput:
             warnings.append(f"Artifact '{artifact.artifact_id}' does not exist at {artifact.uri}.")
             continue
 
+        # Copy every source into runtime storage first so downstream URIs remain stable even if the
+        # original user-supplied file later moves or is deleted.
         target_name = f"{_slug(artifact.artifact_id)}{source_path.suffix or '.bin'}"
         raw_path = raw_dir / target_name
         shutil.copyfile(source_path, raw_path)
@@ -390,6 +389,8 @@ async def acquire_content(input: AcquireContentInput) -> AcquisitionOutput:
 
         mime_type = _detect_mime_type(artifact, raw_path)
         if _is_visual_or_binary(artifact, mime_type):
+            # Visual artifacts can still produce textual evidence through Gemini, so we merge that
+            # output with any locally-readable text instead of treating the strategies as exclusive.
             gemini_result = _extract_with_gemini(
                 artifact=artifact,
                 raw_path=raw_path,
@@ -430,6 +431,8 @@ async def run_structured_extraction(input: StructuredExtractionInput) -> Structu
     executor = _load_executor()
     extraction = executor.generate_structured(
         stage_name="structured_extraction",
+        # Prior extraction output and revision notes are fed back in to support targeted rewrites
+        # instead of forcing the model to rediscover the entire intermediate representation.
         prompt=build_structured_extraction_prompt(
             input.acquisition,
             input.clarifications,
@@ -496,6 +499,8 @@ async def run_draft_spec(input: DraftSpecInput) -> DraftSpecOutput:
         response_model=DraftSpecOutput,
         system_instruction=build_draft_spec_system_instruction(),
     )
+    # The model may fill assumptions/questions in either the top-level fields or the structured
+    # payload. Normalize them here so downstream workflow logic has one canonical view.
     assumptions = draft.assumptions or draft.structured_spec.assumptions
     open_questions = draft.open_questions or draft.structured_spec.open_questions
     summary = draft.summary or draft.structured_spec.objective
@@ -509,6 +514,8 @@ async def run_draft_spec(input: DraftSpecInput) -> DraftSpecOutput:
             "assumptions": _dedupe_strings(assumptions),
             "open_questions": _dedupe_strings(open_questions),
             "summary": summary,
+            # Preserve monotonic versioning across revisions even if the model emits an older
+            # version number than the workflow already knows about.
             "draft_version": max(draft.draft_version, next_draft_version),
         }
     )
@@ -528,7 +535,6 @@ async def run_draft_spec(input: DraftSpecInput) -> DraftSpecOutput:
         }
     )
 
-
 @activity.defn
 async def retrieve_best_practices_passages(
     input: TemporalBestPracticesReviewInput,
@@ -546,6 +552,8 @@ async def retrieve_best_practices_passages(
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         chunk_records = cached["chunks"]
     else:
+        # Cache document embeddings by corpus checksum so repeated review passes for the same corpus
+        # only pay the query-embedding cost.
         embeddings = executor.embed_texts(
             [chunk_text for _, chunk_text in chunks],
             task_type="RETRIEVAL_DOCUMENT",
@@ -562,6 +570,8 @@ async def retrieve_best_practices_passages(
         ]
         cache_path.write_text(json.dumps({"chunks": chunk_records}, indent=2), encoding="utf-8")
 
+    # Retrieve against the full markdown draft rather than a summary so ranking favors passages that
+    # match the actual spec language the reviewer will inspect.
     query_text = input.draft.markdown_spec
     query_embedding = executor.embed_texts([query_text], task_type="RETRIEVAL_QUERY")[0]
     ranked = sorted(
@@ -591,6 +601,8 @@ async def run_best_practices_review(
     executor = _load_executor()
     assessment = executor.generate_structured(
         stage_name="best_practices_review",
+        # Retrieval and reasoning are separated: passage selection happens in one activity, then the
+        # model judges the draft only against the most relevant supporting passages.
         prompt=build_best_practices_review_prompt(input.draft, input.passages),
         response_model=ReviewAssessment,
         system_instruction=build_best_practices_review_system_instruction(),
@@ -622,6 +634,8 @@ async def run_supervisor_decision(input: SupervisorDecisionInput) -> SupervisorD
         system_instruction=build_supervisor_decision_system_instruction(),
     )
     if decision.action == "ask_human" and not decision.questions:
+        # If the model asks for human input without concrete questions, synthesize a small bounded
+        # list from the current draft/review state so the UI always has actionable prompts.
         decision = decision.model_copy(
             update={
                 "questions": _dedupe_strings(
@@ -632,6 +646,8 @@ async def run_supervisor_decision(input: SupervisorDecisionInput) -> SupervisorD
             }
         )
     elif _should_auto_accept(input.extraction_critic, input.best_practices_review, decision):
+        # Keep the activity-side heuristic aligned with the workflow's acceptance shortcut so tests
+        # and single-activity callers observe the same decision boundary.
         decision = decision.model_copy(
             update={
                 "action": "accept",
@@ -657,6 +673,8 @@ async def persist_final_outputs(
     output_dir = Path(input.output_directory).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # The runtime copy is the workflow-owned audit trail. The output-directory copy is the
+    # user-facing deliverable that external tooling can consume directly.
     traceability_summary = _render_traceability_summary(input.draft)
     issues_payload = {
         "open_questions": input.open_questions,
@@ -714,7 +732,6 @@ async def persist_final_outputs(
         artifact_uris=artifact_uris,
         output_directory=str(output_dir),
     )
-
 
 SPEC_BUILDER_ACTIVITIES = [
     acquire_content,

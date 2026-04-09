@@ -1,9 +1,7 @@
 """Child workflow for the Temporal best-practices review stage."""
 
 from __future__ import annotations
-
 from datetime import timedelta
-
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
@@ -25,11 +23,15 @@ class TemporalBestPracticesReviewWorkflow:
     @workflow.run
     async def run(self, input: TemporalBestPracticesReviewInput) -> BestPracticesReviewOutput:
         """Retrieve best-practices passages and review the draft against them."""
+        # Retrieval is kept as its own activity so corpus embedding/cache behavior is isolated from
+        # the review model call and can be retried independently.
         passages = await workflow.execute_activity(
             retrieve_best_practices_passages,
             input,
             start_to_close_timeout=timedelta(minutes=5),
         )
+        # The second activity consumes only the bounded set of retrieved passages, which keeps the
+        # review prompt focused and the child workflow history compact.
         return await workflow.execute_activity(
             run_best_practices_review,
             RunBestPracticesReviewActivityInput(

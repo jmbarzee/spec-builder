@@ -13,19 +13,14 @@ from temporalio.workflow import ParentClosePolicy
 HUMAN_RESPONSE_TIMEOUT = timedelta(hours=24)
 
 with workflow.unsafe.imports_passed_through():
-    from temporalio.client import Client  # noqa: PLC0415
-    from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: PLC0415
 
     from src.workflows.spec_builder.custom_types import (
         AcquireContentInput,
         ApproveDraftInput,
-        ArtifactInput,
-        BestPracticesViolation,
         CancelJobInput,
         ClarificationRecord,
         DraftMetadata,
         DraftSpecInput,
-        DraftSpecOutput,
         ExtractionCriticInput,
         ForceFinalizeDraftInput,
         IntentClassificationInput,
@@ -57,24 +52,33 @@ with workflow.unsafe.imports_passed_through():
         TemporalBestPracticesReviewWorkflow,
     )
 
-
 @workflow.defn
 class SpecBuilderWorkflow:
     """Durable fixed-pipeline spec builder workflow."""
 
     def __init__(self) -> None:
+        """Initialize durable and in-memory control state for one workflow execution."""
+        
+        # state is the durable workflow snapshot that survives replay and continue-as-new.
         self.state: SpecBuilderState | None = None
+        
+        # These fields cache signal-side control flow derived from durable state so the workflow can
+        # make decisions without repeatedly scanning prior requests or mutating state mid-query.
         self._processed_request_ids: set[str] = set()
         self._approval_granted = False
         self._approval_note: str | None = None
         self._rejection_payload: RejectDraftInput | None = None
 
+    
     def _ensure_state(self) -> SpecBuilderState:
+        #TODO: Validate if this helper method is really necessary
         if self.state is None:
             raise RuntimeError("Workflow state has not been initialized yet.")
         return self.state
 
     def _merge_questions(self, *question_groups: list[str]) -> list[str]:
+        # Keep the first-seen ordering stable so the UI and downstream prompts do not thrash when
+        # the same question is surfaced by multiple stages.
         merged: list[str] = []
         seen: set[str] = set()
         for group in question_groups:
@@ -117,6 +121,8 @@ class SpecBuilderWorkflow:
         state = self._ensure_state()
         if state.draft is None:
             return None
+        # The draft already carries explicit traceability entries. The summary adds a compact
+        # "what is still uncovered?" view for the GUI without exposing the entire workflow state.
         known_claims = {entry.claim for entry in state.draft.structured_spec.traceability}
         uncovered_claims = [
             question for question in state.draft.open_questions if question not in known_claims
@@ -168,6 +174,9 @@ class SpecBuilderWorkflow:
 
     def _should_auto_accept_supervisor_decision(self) -> bool:
         state = self._ensure_state()
+        # The supervisor may still ask for a revision even when the critic says the extraction is
+        # sound and best-practices review only found non-blocking warnings. In that narrow case we
+        # collapse the decision to `accept` to avoid churn from low-signal rewrite loops.
         if (
             state.supervisor_decision is None
             or state.extraction_critic is None
@@ -188,6 +197,9 @@ class SpecBuilderWorkflow:
 
     def _prepare_restart(self, restart_point: RestartPoint) -> None:
         state = self._ensure_state()
+        # Restarting from a checkpoint means two things:
+        # 1. Preserve the most recent outputs as "previous_*" context for the next attempt.
+        # 2. Clear every downstream artifact that is no longer valid from that checkpoint onward.
         state.pending_human_action = None
         self._approval_granted = False
         self._approval_note = None
@@ -224,7 +236,12 @@ class SpecBuilderWorkflow:
 
     async def _force_finalize(self, input: SpecBuilderInput) -> SpecBuilderResult:
         state = self._ensure_state()
-        force_finalize_warnings = ["Force-finalized from the UI despite high-risk policy violations."]
+        # Force-finalize is intentionally opinionated.
+        # We only allow it once a reviewed draft exists, and we annotate the output so downstream
+        # readers can see that policy concerns were waived.
+        force_finalize_warnings = [
+            "Force-finalized from the UI despite high-risk policy violations."
+        ]
         if state.force_finalize_reason:
             force_finalize_warnings.append(
                 f"Force-finalize note: {state.force_finalize_reason}"
@@ -265,11 +282,16 @@ class SpecBuilderWorkflow:
         return await workflow.execute_child_workflow(
             TemporalBestPracticesReviewWorkflow.run,
             stage_input,
+            # Use a unique child workflow ID per attempt so a restarted draft review never collides
+            # with a previously-completed child from the same parent execution.
             id=f"{workflow.info().workflow_id}-best-practices-review-{workflow.uuid4()}",
             task_queue=SPEC_BUILDER_TASK_QUEUE,
             parent_close_policy=ParentClosePolicy.TERMINATE,
         )
 
+    # Queries expose progressively richer read models. The GUI mostly uses `get_live_state()` to
+    # fetch all active-job data in one RPC, while narrower queries remain useful for debugging.
+    #TODO: Validate which of these are actually necessary and remove the rest if they are not being used by the GUI or tests.
     @workflow.query
     def get_status(self) -> SpecBuilderStatus:
         """Return the current workflow status snapshot."""
@@ -279,29 +301,6 @@ class SpecBuilderWorkflow:
     def get_live_state(self) -> SpecBuilderLiveState:
         """Return the current workflow state needed by the GUI in one snapshot."""
         return self._live_state()
-
-    @workflow.query
-    def get_current_phase(self) -> str:
-        """Return the current workflow phase name."""
-        return self._ensure_state().phase
-
-    @workflow.query
-    def get_current_draft(self) -> DraftSpecOutput | None:
-        """Return the latest draft when available."""
-        return self._ensure_state().draft
-
-    @workflow.query
-    def get_open_questions(self) -> list[str]:
-        """Return the current open question list."""
-        return self._ensure_state().open_questions
-
-    @workflow.query
-    def get_best_practices_violations(self) -> list[BestPracticesViolation]:
-        """Return the current best-practices violations."""
-        state = self._ensure_state()
-        if state.best_practices_review is None:
-            return []
-        return state.best_practices_review.violations
 
     @workflow.query
     def get_traceability_summary(self) -> TraceabilitySummary | None:
@@ -314,6 +313,7 @@ class SpecBuilderWorkflow:
         if self.state is None:
             workflow.logger.warning("Clarification received before state initialization.")
             return
+        # Every external signal carries a request ID so retries from the GUI remain idempotent.
         if self._seen_request(payload.request_id):
             return
         self._record_request(payload.request_id)
@@ -382,6 +382,7 @@ class SpecBuilderWorkflow:
     @workflow.signal
     def cancel_job(self, payload: CancelJobInput) -> None:
         """Cancel the current submission."""
+        #TODO: Validate if this actually works, it's been buggy
         if self.state is None:
             workflow.logger.warning("Cancellation received before state initialization.")
             return
@@ -396,6 +397,8 @@ class SpecBuilderWorkflow:
         state.phase = "waiting_for_human"
         state.pending_human_action = "clarification"
         state.open_questions = self._merge_questions(state.open_questions, questions)
+        # Only new clarifications should wake this wait. Existing clarifications were already folded
+        # into a prior attempt, so we capture a durable baseline count before blocking.
         baseline = state.last_applied_clarification_count
         if len(state.clarifications) <= baseline and not state.canceled:
             try:
@@ -419,6 +422,8 @@ class SpecBuilderWorkflow:
         state = self._ensure_state()
         state.phase = "waiting_for_approval"
         state.pending_human_action = "approval"
+        # Approval, rejection, cancellation, and force-finalize all share the same wait because the
+        # caller needs to branch differently depending on which human action arrived first.
         if not self._approval_granted and self._rejection_payload is None and not state.canceled:
             try:
                 await workflow.wait_condition(
@@ -452,6 +457,8 @@ class SpecBuilderWorkflow:
         if not workflow.info().is_continue_as_new_suggested():
             return
 
+        # Continue-as-new trims workflow history, but only after outstanding signal/query handlers
+        # have drained so we do not drop an in-flight human decision during rollover.
         await workflow.wait_condition(workflow.all_handlers_finished)
         resumed_state = state.model_copy(
             deep=True,
@@ -527,6 +534,8 @@ class SpecBuilderWorkflow:
     @workflow.run
     async def run(self, input: SpecBuilderInput) -> SpecBuilderResult:
         """Run the fixed spec-builder pipeline with bounded iteration."""
+        # A continued execution resumes from the last durable checkpoint; a fresh execution starts
+        # from an empty state rooted at the provided job ID.
         self.state = (
             input.resume_state.model_copy(deep=True)
             if input.resume_state
@@ -538,6 +547,8 @@ class SpecBuilderWorkflow:
 
         try:
             while self.state.iteration < input.options.max_iterations:
+                # Force-finalize and cancellation are checked at the top of each attempt so the
+                # workflow can exit cleanly before starting another expensive activity chain.
                 if self._has_force_finalize_request():
                     return await self._force_finalize(input)
 
@@ -548,6 +559,8 @@ class SpecBuilderWorkflow:
                     )
 
                 if self.state.restart_point == "acquire":
+                    # Acquisition only reruns when the user asks to revisit source artifacts from
+                    # scratch. Restarts from later checkpoints preserve the last acquisition output.
                     self.state.phase = "acquire"
                     self.state.acquisition = await self._execute_stage_activity(
                         acquire_content,
@@ -566,6 +579,8 @@ class SpecBuilderWorkflow:
                     )
 
                 if self.state.restart_point in {"acquire", "extract"}:
+                    # Extraction and classification are paired because a new extraction invalidates
+                    # any prior interpretation of intent.
                     self.state.phase = "extract"
                     self.state.extraction = await self._execute_stage_activity(
                         run_structured_extraction,
@@ -618,6 +633,8 @@ class SpecBuilderWorkflow:
                 )
 
                 if self.state.extraction_critic.recommended_action == "reextract":
+                    # Critic-driven re-extraction is the automated "tighten the inputs and try
+                    # again" path. Once we exhaust the restart budget, we escalate to the user.
                     self._record_revision_notes(
                         self.state.extraction_critic.blocking_issues,
                         self.state.extraction_critic.missing_information,
@@ -646,6 +663,8 @@ class SpecBuilderWorkflow:
                     continue
 
                 if self.state.extraction_critic.recommended_action == "ask_human":
+                    # The critic can pause the workflow before drafting when the extracted model is
+                    # plausible but under-specified enough that only a human can close the gap.
                     clarification_outcome = await self._wait_for_clarification(
                         self.state.open_questions
                     )
@@ -694,6 +713,8 @@ class SpecBuilderWorkflow:
                 )
 
                 self.state.phase = "best_practices_review"
+                # Best-practices review runs as a child workflow because it is substantial enough to
+                # deserve its own isolated execution history and retry semantics.
                 self.state.best_practices_review = await self._execute_best_practices_review(
                     TemporalBestPracticesReviewInput(
                         job_id=input.job_id,
@@ -742,6 +763,8 @@ class SpecBuilderWorkflow:
                     )
 
                 if self.state.supervisor_decision.action == "accept":
+                    # "Accept" can still be subject to a final human gate. Rejection at this point
+                    # translates into a targeted restart rather than a terminal failure.
                     if input.options.require_human_approval:
                         approval_outcome = await self._wait_for_approval()
                         if approval_outcome == "approved":
@@ -785,6 +808,8 @@ class SpecBuilderWorkflow:
                         return await self._complete(input)
 
                 if self.state.supervisor_decision.action == "revise_from_extraction":
+                    # A supervisor-directed extraction revision rewinds farther upstream than a
+                    # draft-only revision because the issue is with the interpreted source model.
                     reason = self.state.supervisor_decision.reason or "Supervisor requested re-extraction."
                     self._record_revision_notes([reason])
                     if self.state.extraction_restarts >= input.options.max_extraction_restarts:
@@ -810,6 +835,8 @@ class SpecBuilderWorkflow:
                         [reason],
                     )
                 elif self.state.supervisor_decision.action == "revise_from_draft":
+                    # Draft revisions preserve extraction artifacts and feed the previous draft back
+                    # into the next drafting attempt as revision context.
                     reason = self.state.supervisor_decision.reason or "Supervisor requested a draft revision."
                     self._record_revision_notes([reason])
                     if self.state.draft_restarts >= input.options.max_draft_restarts:
@@ -837,6 +864,8 @@ class SpecBuilderWorkflow:
                         [reason],
                     )
                 elif self.state.supervisor_decision.action == "ask_human":
+                    # The supervisor has the last word on whether the workflow can proceed without
+                    # more human input, even if earlier stages were satisfied.
                     clarification_outcome = await self._wait_for_clarification(
                         self._merge_questions(
                             self.state.open_questions,
@@ -858,42 +887,14 @@ class SpecBuilderWorkflow:
                     self.state.restart_point = "draft"
                     self._prepare_restart("draft")
 
+                # Any non-terminal supervisor branch loops back through the pipeline from the
+                # selected restart point, possibly continuing as new if history has grown too large.
                 await self._advance_iteration(input)
 
             return self._result_from_state(
                 status="needs_clarification",
                 extra_warning="Iteration limit reached before acceptance.",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  #
             workflow.logger.exception("Spec builder workflow failed: %s", exc)
             return self._result_from_state(status="failed", extra_warning=str(exc))
-
-
-async def main() -> None:  # pragma: no cover
-    """Connect to Temporal and execute a local sample run."""
-    client = await Client.connect("localhost:7233", data_converter=pydantic_data_converter)
-    sample_input = SpecBuilderInput(
-        job_id="spec-builder-sample",
-        artifacts=[
-            ArtifactInput(
-                artifact_id="readme",
-                uri=str(Path("README.md").resolve()),
-                type="markdown",
-                title="Repository README",
-            )
-        ],
-        user_intent="Generate a Temporal implementation-ready spec.",
-        output_targets=["markdown_spec", "structured_json"],
-        output_directory=".spec_builder_runtime/manual-output",
-    )
-    result = await client.execute_workflow(
-        SpecBuilderWorkflow.run,
-        sample_input,
-        id="spec-builder-sample",
-        task_queue=SPEC_BUILDER_TASK_QUEUE,
-    )
-    print(result.model_dump_json(indent=2))  # noqa: T201
-
-
-if __name__ == "__main__":  # pragma: no cover
-    asyncio.run(main())
