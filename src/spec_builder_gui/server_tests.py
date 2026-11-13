@@ -621,3 +621,116 @@ async def test_pick_output_directory_should_degrade_cleanly_when_unsupported(
 
         assert response.status == 200
         assert payload == {"supported": False, "cancelled": False, "path": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env_value", "twf_path", "expected"),
+    [
+        ("1", "/usr/bin/twf", True),
+        (None, "/usr/bin/twf", False),
+        ("1", None, False),
+    ],
+)
+async def test_get_features_should_report_architecture_mode_only_when_opted_in_and_twf_resolves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str | None,
+    twf_path: str | None,
+    expected: bool,
+) -> None:
+    """Architecture mode needs both the env opt-in and a resolvable `twf`."""
+    if env_value is None:
+        monkeypatch.delenv("SPEC_BUILDER_ARCHITECTURE_MODE", raising=False)
+    else:
+        monkeypatch.setenv("SPEC_BUILDER_ARCHITECTURE_MODE", env_value)
+    monkeypatch.setattr("src.spec_builder_gui.service.shutil.which", lambda _name: twf_path)
+    async with app_client(tmp_path) as (client, _service, _gateway):
+        response = await client.get("/api/system/features")
+
+        assert response.status == 200
+        assert await response.json() == {"architectureMode": expected}
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_should_record_architecture_mode_in_workflow_input_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An enabled deployment passes the job's architecture choice to the workflow."""
+    monkeypatch.setenv("SPEC_BUILDER_ARCHITECTURE_MODE", "1")
+    monkeypatch.setattr("src.spec_builder_gui.service.shutil.which", lambda _name: "/usr/bin/twf")
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, _service, gateway):
+        artifact = await upload_test_artifact(client)
+        response = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Spotify Sync",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+                architecture_mode=True,
+            ).model_dump(by_alias=True),
+        )
+
+        assert response.status == 201
+        assert gateway.started_inputs[0][2].architecture_mode is True
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_should_reject_architecture_mode_when_not_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job cannot request architecture mode on a deployment that has not enabled it."""
+    monkeypatch.delenv("SPEC_BUILDER_ARCHITECTURE_MODE", raising=False)
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, _service, gateway):
+        artifact = await upload_test_artifact(client)
+        response = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Spotify Sync",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+                architecture_mode=True,
+            ).model_dump(by_alias=True),
+        )
+
+        assert response.status == 400
+        assert not gateway.started_inputs
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_should_keep_the_stage_list_unchanged_when_architecture_mode_is_off(
+    tmp_path: Path,
+) -> None:
+    """A flag-off job shows exactly the seven original stages."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        response = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Spotify Sync",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await response.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+
+        assert gateway.started_inputs[0][2].architecture_mode is False
+        assert record is not None
+        assert [state.stage for state in record.stages] == [
+            "acquire",
+            "extract",
+            "classify",
+            "critic",
+            "draft",
+            "best_practices_review",
+            "supervisor",
+        ]

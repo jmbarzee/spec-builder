@@ -508,6 +508,7 @@ class SpecBuilderInput(StrictModel):
     output_targets: list[OutputTarget]
     output_directory: str
     options: SpecBuilderOptions = Field(default_factory=SpecBuilderOptions)
+    architecture_mode: bool = False
     resume_state: SpecBuilderState | None = None
 
 

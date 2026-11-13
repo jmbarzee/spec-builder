@@ -147,6 +147,12 @@ async def download_spec(request: web.Request) -> web.StreamResponse:
     return response
 
 
+async def get_features(request: web.Request) -> web.Response:
+    """Handle system feature discovery requests."""
+    service = await get_service(request)
+    return json_response(service.get_features())
+
+
 async def pick_output_directory(request: web.Request) -> web.Response:
     """Handle optional native directory picker requests."""
     service = await get_service(request)
@@ -184,6 +190,7 @@ def create_app(
     app.router.add_post("/api/jobs/{job_id}/revise", create_revision)
     app.router.add_post("/api/jobs/{job_id}/approve-revision", approve_revision_as_final)
     app.router.add_get("/api/jobs/{job_id}/download", download_spec)
+    app.router.add_get("/api/system/features", get_features)
     app.router.add_post("/api/system/pick-output-directory", pick_output_directory)
 
     frontend_dir = app[FRONTEND_DIST_APP_KEY]

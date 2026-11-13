@@ -504,6 +504,43 @@ class TestSpecBuilderWorkflow:
             assert counters["persist"] == 1
 
     @pytest.mark.asyncio
+    async def test_should_run_only_the_base_activities_when_architecture_mode_is_off(
+        self,
+        client: Client,
+        task_queue: str,
+        tmp_path,
+    ) -> None:
+        async with self.run_scenario(
+            client,
+            task_queue,
+            "happy_path",
+            self.build_input(tmp_path),
+        ) as (_counters, handle):
+            await handle.result()
+            history = await handle.fetch_history()
+
+        scheduled = [
+            event.activity_task_scheduled_event_attributes.activity_type.name
+            for event in history.events
+            if event.HasField("activity_task_scheduled_event_attributes")
+        ]
+        children = [
+            event.start_child_workflow_execution_initiated_event_attributes.workflow_type.name
+            for event in history.events
+            if event.HasField("start_child_workflow_execution_initiated_event_attributes")
+        ]
+        assert scheduled == [
+            "acquire_content",
+            "run_structured_extraction",
+            "run_intent_classification",
+            "run_extraction_critic",
+            "run_draft_spec",
+            "run_supervisor_decision",
+            "persist_final_outputs",
+        ]
+        assert children == ["TemporalBestPracticesReviewWorkflow"]
+
+    @pytest.mark.asyncio
     async def test_should_restart_from_draft_when_supervisor_requests_draft_revision(
         self,
         client: Client,

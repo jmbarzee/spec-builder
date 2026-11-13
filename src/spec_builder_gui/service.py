@@ -6,6 +6,7 @@ import asyncio
 import mimetypes
 import os
 import re
+import shutil
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
@@ -33,6 +34,7 @@ from src.spec_builder_gui.api_models import (
     StageState,
     StoredJobRecord,
     SubmitReviewRequest,
+    SystemFeatures,
     UploadedArtifact,
     UploadArtifactResponse,
 )
@@ -95,8 +97,15 @@ ALLOWED_UPLOADS = {
     ".jpeg": ("image", "image", {"image/jpeg"}),
     ".webp": ("image", "image", {"image/webp"}),
 }
+ARCHITECTURE_MODE_ENV = "SPEC_BUILDER_ARCHITECTURE_MODE"
 ACTIVE_JOB_STATUSES = {"queued", "running", "waiting_for_human"}
 CLOSED_JOB_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def architecture_mode_enabled() -> bool:
+    """Return whether the deployment opted in to architecture mode and `twf` is installed."""
+    opted_in = os.environ.get(ARCHITECTURE_MODE_ENV, "").lower() in {"1", "true", "yes"}
+    return opted_in and shutil.which("twf") is not None
 
 
 def utc_now() -> datetime:
@@ -526,6 +535,8 @@ class SpecBuilderGuiService:
         total_size = sum(artifact.size_bytes for artifact in artifacts)
         if total_size > MAX_TOTAL_UPLOAD_SIZE_BYTES:
             raise GuiServiceError("Combined upload size exceeds the 200 MiB limit.")
+        if request.architecture_mode and not architecture_mode_enabled():
+            raise GuiServiceError("Architecture mode is not enabled on this deployment.")
         output_directory = self._validate_output_directory(request.output_directory)
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         workflow_id = f"spec-builder-ui-{job_id}"
@@ -546,6 +557,7 @@ class SpecBuilderGuiService:
             output_targets=request.output_targets,
             output_directory=output_directory,
             options=SpecBuilderOptions(require_human_approval=request.require_human_approval),
+            architecture_mode=request.architecture_mode,
         )
         started = await self.temporal_gateway.start_workflow(
             workflow_id=workflow_id,
@@ -563,6 +575,7 @@ class SpecBuilderGuiService:
             artifacts=artifacts,
             user_intent=request.user_intent,
             require_human_approval=request.require_human_approval,
+            architecture_mode=request.architecture_mode,
             output_targets=request.output_targets,
             stages=default_stage_states(),
         )
@@ -861,6 +874,7 @@ class SpecBuilderGuiService:
             artifact_ids=[artifact.artifact_id for artifact in revision_artifacts],
             user_intent=parent.user_intent,
             require_human_approval=parent.require_human_approval,
+            architecture_mode=parent.architecture_mode,
             output_targets=parent.output_targets,
         )
         created = await self.create_job(create_job_request)
@@ -922,6 +936,10 @@ class SpecBuilderGuiService:
             uri_to_path(download_uri),
             self._sanitize_download_name(record.project_name),
         )
+
+    def get_features(self) -> SystemFeatures:
+        """Report which optional capabilities this deployment offers."""
+        return SystemFeatures(architecture_mode=architecture_mode_enabled())
 
     async def pick_output_directory(self) -> PickOutputDirectoryResponse:
         """Open a native directory picker when supported by the local host."""
