@@ -4,6 +4,9 @@ Build each `StepAgent` at import time, in a module the workflow imports under
 `workflow.unsafe.imports_passed_through()`, and list its `agent` in the workflow's
 `__pydantic_ai_agents__`. Stage code calls `run_step`; `durable` picks whether each model and
 tool call is its own activity or the whole run is one.
+
+An agent's MCP connection binds to the first event loop that runs it. A process that needs more than
+one loop (tests, say) builds its transport with `StdioTransport(..., keep_alive=False)` instead.
 """
 
 from __future__ import annotations
@@ -49,7 +52,7 @@ class StepAgentSpec:
     instructions: str
     skills_dir: Path | None = None  # each subdirectory holds a SKILL.md
     mcp_servers: tuple[McpServer, ...] = ()
-    timeout: timedelta = timedelta(minutes=5)
+    timeout: timedelta = timedelta(minutes=5)  # per call when durable, the whole run when plain
 
 
 class HeldCall(BaseModel):
@@ -102,6 +105,9 @@ class StepAgent:
         capabilities.append(
             TemporalDurability(activity_config=ActivityConfig(start_to_close_timeout=spec.timeout))
         )
+        if spec.name in _REGISTRY:
+            msg = f"Step agent {spec.name!r} is already registered."
+            raise ValueError(msg)
         self.spec = spec
         self.agent = Agent(
             spec.model,

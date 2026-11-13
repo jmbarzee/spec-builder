@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin, PydanticAIWorkflow
 from temporalio import workflow
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Client
 from temporalio.worker import Worker
 
+if TYPE_CHECKING:
+    from temporalio.client import Client
+
 with workflow.unsafe.imports_passed_through():
-    from src.workflows.spec_builder.step_agent import StepRequest, run_step, run_step_agent
+    from src.workflows.spec_builder.step_agent import (
+        StepAgent,
+        StepAgentSpec,
+        StepRequest,
+        run_step,
+        run_step_agent,
+    )
     from src.workflows.spec_builder.tests.step_agent_fixtures.probe import PROBE
 
 
@@ -27,7 +36,7 @@ class ProbeWorkflow(PydanticAIWorkflow):
     async def run(self, durable: bool) -> str:  # noqa: FBT001
         """Return the agent's final output."""
         held = await run_step(StepRequest(agent="probe", prompt="go"), durable=durable)
-        assert held.held  # noqa: S101
+        assert held.held
         done = await run_step(
             StepRequest(
                 agent="probe",
@@ -36,7 +45,7 @@ class ProbeWorkflow(PydanticAIWorkflow):
             ),
             durable=durable,
         )
-        assert done.output is not None  # noqa: S101
+        assert done.output is not None
         return done.output
 
 
@@ -62,7 +71,7 @@ async def _activity_types(client: Client, *, durable: bool) -> tuple[str, set[st
 @pytest.fixture
 def plugin_client(client: Client) -> Client:
     """The shared test client; `conftest.py` installs the Pydantic AI plugin on it."""
-    assert any(isinstance(p, PydanticAIPlugin) for p in client.config()["plugins"])  # noqa: S101
+    assert any(isinstance(p, PydanticAIPlugin) for p in client.config()["plugins"])
     return client
 
 
@@ -93,6 +102,16 @@ class TestStepAgent:
 
         assert second.output == "done"
         assert second.held == []
+
+    async def test_step_agent_should_reject_a_duplicate_name(self) -> None:
+        """
+        Scenario: Duplicate agent name
+        Given the probe agent is registered
+        When another agent takes its name
+        Then construction raises ValueError
+        """
+        with pytest.raises(ValueError, match="already registered"):
+            StepAgent(StepAgentSpec(name="probe", model=PROBE.spec.model, instructions="again"))
 
     async def test_run_step_should_schedule_each_model_and_tool_call_as_an_activity_when_durable(
         self, plugin_client: Client
