@@ -499,6 +499,37 @@ class PersistFinalOutputsOutput(StrictModel):
     output_directory: str
 
 
+class TwfDiagnostic(StrictModel):
+    """One parser finding from `twf parse`, positioned in the checked source."""
+
+    severity: str
+    code: str
+    line: int
+    column: int
+    message: str
+
+
+class ValidateTwfInput(StrictModel):
+    """Activity input for the `.twf` validation gate."""
+
+    job_id: str
+    source: str
+
+
+class ValidateTwfOutput(StrictModel):
+    """Activity output for the `.twf` validation gate.
+
+    `source` is the design after `twf fmt`. `artifact_uris` holds `twf_source`, `twf_parse_json`
+    (the full `twf parse` envelope: AST, diagnostics, summary) and `twf_graph_json` (the full
+    `twf graph --json` envelope), all under the job's `twf/` runtime directory.
+    """
+
+    source: str
+    valid: bool
+    diagnostics: list[TwfDiagnostic] = Field(default_factory=list)
+    artifact_uris: dict[str, str] = Field(default_factory=dict)
+
+
 class SpecBuilderInput(StrictModel):
     """Public workflow input."""
 
