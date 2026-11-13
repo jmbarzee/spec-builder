@@ -135,13 +135,9 @@ When `requireHumanApproval` is enabled, a supervisor `accept` moves the workflow
 
 Queries:
 
-- `get_status`
-- `get_live_state`
-- `get_current_phase`
-- `get_current_draft`
-- `get_open_questions`
-- `get_best_practices_violations`
-- `get_traceability_summary`
+- `get_status`: phase, iteration, restart counters, pending human action, open questions, and warnings
+- `get_live_state`: one atomic snapshot of the status, current draft, best-practices violations, and traceability summary
+- `get_traceability_summary`: traceability entries and uncovered claims for the current draft, or `None`
 
 Signals:
 
