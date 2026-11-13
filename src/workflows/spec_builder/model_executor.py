@@ -95,7 +95,9 @@ def validate_settings() -> None:
         if name.startswith("SPEC_BUILDER_GEMINI_"):
             suffix = name.removeprefix("SPEC_BUILDER_GEMINI_")
             replacement = (
-                f"SPEC_BUILDER_{suffix}" if suffix.endswith("_MODEL") else f"SPEC_BUILDER_MODEL_{suffix}"
+                f"SPEC_BUILDER_{suffix}"
+                if suffix.endswith("_MODEL")
+                else f"SPEC_BUILDER_MODEL_{suffix}"
             )
             raise ModelExecutorError(f"{name} is retired; set {replacement} instead.")
     for stage_name in DEFAULT_MODELS:
@@ -127,9 +129,13 @@ class _GeminiSchemaTransformer(GoogleJsonSchemaTransformer):
         return kept
 
 
-def _gemini_model(name: str, provider: GoogleProvider | Literal["google"] = "google") -> GoogleModel:
+def _gemini_model(
+    name: str, provider: GoogleProvider | Literal["google"] = "google"
+) -> GoogleModel:
     return GoogleModel(
-        name, provider=provider, profile=ModelProfile(json_schema_transformer=_GeminiSchemaTransformer)
+        name,
+        provider=provider,
+        profile=ModelProfile(json_schema_transformer=_GeminiSchemaTransformer),
     )
 
 

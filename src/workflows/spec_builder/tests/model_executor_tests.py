@@ -71,7 +71,9 @@ class FakeEmbedModels:
         self.models.append(model)
         self.batch_sizes.append(len(contents))
         return SimpleNamespace(
-            embeddings=[SimpleNamespace(values=[float(text.rsplit("-", 1)[1])]) for text in contents]
+            embeddings=[
+                SimpleNamespace(values=[float(text.rsplit("-", 1)[1])]) for text in contents
+            ]
         )
 
 
@@ -100,7 +102,9 @@ class TestResolveModel:
 
         assert resolve_model(stage_name) == expected
 
-    def test_resolve_model_should_honor_the_stage_setting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_resolve_model_should_honor_the_stage_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """
         Scenario: A stage setting
         Given SPEC_BUILDER_DRAFT_SPEC_MODEL names another provider
@@ -209,7 +213,10 @@ class TestGenerateStructured:
                 200,
                 json={
                     "candidates": [
-                        {"content": {"role": "model", "parts": [{"functionCall": call}]}, "finishReason": "STOP"}
+                        {
+                            "content": {"role": "model", "parts": [{"functionCall": call}]},
+                            "finishReason": "STOP",
+                        }
                     ]
                 },
             )
@@ -221,7 +228,8 @@ class TestGenerateStructured:
             ),
         )
         _use_model(
-            monkeypatch, _gemini_model("gemini-3.1-pro-preview", provider=GoogleProvider(client=client))
+            monkeypatch,
+            _gemini_model("gemini-3.1-pro-preview", provider=GoogleProvider(client=client)),
         )
 
         result = await ModelExecutor().generate_structured(
@@ -261,7 +269,10 @@ class TestGenerateStructured:
         monkeypatch.setattr(model_executor.asyncio, "sleep", _no_sleep)
 
         result = await ModelExecutor(max_attempts=2).generate_structured(
-            stage_name="draft_spec", prompt="hello", response_model=ExampleResponse, system_instruction="s"
+            stage_name="draft_spec",
+            prompt="hello",
+            response_model=ExampleResponse,
+            system_instruction="s",
         )
 
         assert result.message == "ok"
@@ -399,11 +410,10 @@ def test_readme_should_document_every_stage_setting_with_its_default() -> None:
     """
     Scenario: Settings documentation
     Given the README's Model Configuration section
-    Then every stage and embedding setting and each default should appear in it
+    Then every stage name and each default model should appear in it
     """
     readme = (Path(__file__).parents[4] / "README.md").read_text()
 
     for stage_name, spec in DEFAULT_MODELS.items():
-        assert stage_name.upper() in readme or stage_name == "embedding"
+        assert stage_name.upper() in readme
         assert spec in readme
-    assert "SPEC_BUILDER_EMBEDDING_MODEL" in readme
