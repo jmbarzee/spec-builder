@@ -1,4 +1,4 @@
-"""Prompt builders for spec builder Gemini-backed activities."""
+"""Prompt builders for spec builder model-backed activities."""
 
 from __future__ import annotations
 

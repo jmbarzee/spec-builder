@@ -9,6 +9,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from src.workflows.spec_builder.custom_types import SPEC_BUILDER_TASK_QUEUE
+from src.workflows.spec_builder.model_executor import validate_settings
 from src.workflows.spec_builder.spec_builder_activities import SPEC_BUILDER_ACTIVITIES
 from src.workflows.spec_builder.spec_builder_workflow import SpecBuilderWorkflow
 from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
@@ -33,6 +34,7 @@ def build_worker(client: Client) -> Worker:
 
 async def main() -> None:
     """Connect to the local Temporal dev server and run the worker."""
+    validate_settings()
     client = await Client.connect("localhost:7233", plugins=[PydanticAIPlugin()])
     worker = build_worker(client)
     await worker.run()
