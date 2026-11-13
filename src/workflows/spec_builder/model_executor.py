@@ -31,6 +31,7 @@ DEFAULT_MODELS = {
     "draft_spec": DEFAULT_GENERATION_MODEL,
     "best_practices_review": DEFAULT_GENERATION_MODEL,
     "supervisor_decision": DEFAULT_GENERATION_MODEL,
+    "design": DEFAULT_GENERATION_MODEL,
     "embedding": f"{GEMINI_PROVIDER}:gemini-embedding-001",
 }
 MAX_EMBED_BATCH_SIZE = 100
@@ -78,7 +79,7 @@ def _setting_name(stage_name: str) -> str:
     return f"SPEC_BUILDER_{stage_name.upper()}_MODEL"
 
 
-def _load_project_dotenv() -> None:
+def load_project_dotenv() -> None:
     """Load the nearest project `.env` without overriding exported variables."""
     # Tests and CLI entry points do not always run from the repo root, so the search starts at
     # the cwd and then at this module's directory.
@@ -90,7 +91,7 @@ def _load_project_dotenv() -> None:
 
 def validate_settings() -> None:
     """Fail on a retired `SPEC_BUILDER_GEMINI_*` variable, naming its replacement."""
-    _load_project_dotenv()
+    load_project_dotenv()
     for name in sorted(os.environ):
         if name.startswith("SPEC_BUILDER_GEMINI_"):
             suffix = name.removeprefix("SPEC_BUILDER_GEMINI_")

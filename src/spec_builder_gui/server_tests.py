@@ -860,6 +860,41 @@ async def test_post_jobs_should_keep_the_stage_list_unchanged_when_architecture_
         ]
 
 
+@pytest.mark.asyncio
+async def test_job_detail_should_show_the_design_stage_after_supervisor_on_architecture_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An architecture job lists eight stages, and the design stage runs after the supervisor."""
+    monkeypatch.setenv("SPEC_BUILDER_ARCHITECTURE_MODE", "1")
+    monkeypatch.setattr("src.spec_builder_gui.service.shutil.which", lambda _name: "/usr/bin/twf")
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Spotify Sync",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+                architecture_mode=True,
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+        assert [state.stage for state in record.stages][-2:] == ["supervisor", "design"]
+
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(job_id, phase="design")
+        detail = await (await client.get(f"/api/jobs/{job_id}")).json()
+
+        statuses = {stage["stage"]: stage["status"] for stage in detail["stages"]}
+        assert len(statuses) == 8
+        assert statuses["supervisor"] == "completed"
+        assert statuses["design"] == "running"
+
+
 TWF_DESIGN = 'workflow Foo():\n\tactivity Bar()\n\nactivity Bar() -> (string):\n\treturn "x"\n'
 
 

@@ -23,6 +23,7 @@ WorkflowPhase = Literal[
     "draft",
     "best_practices_review",
     "supervisor",
+    "design",
     "waiting_for_human",
     "waiting_for_approval",
     "completed",
@@ -95,6 +96,7 @@ class SpecBuilderOptions(StrictModel):
     max_iterations: int = Field(default=4, ge=1)
     max_extraction_restarts: int = Field(default=2, ge=0)
     max_draft_restarts: int = Field(default=2, ge=0)
+    max_twf_revisions: int = Field(default=2, ge=0)  # design repairs after the first attempt
     require_human_approval: bool = False
     best_practices_corpus_uri: str | None = None
     durable_agents: bool = True
@@ -342,6 +344,7 @@ class SpecBuilderState(StrictModel):
     draft: DraftSpecOutput | None = None
     best_practices_review: BestPracticesReviewOutput | None = None
     supervisor_decision: SupervisorDecision | None = None
+    design: ValidateTwfOutput | None = None  # the design stage's final verdict
     previous_extraction: StructuredExtractionOutput | None = None
     previous_draft: DraftSpecOutput | None = None
     previous_best_practices_review: BestPracticesReviewOutput | None = None
@@ -552,6 +555,15 @@ class ValidateTwfOutput(StrictModel):
     valid: bool
     diagnostics: list[TwfDiagnostic] = Field(default_factory=list)
     artifact_uris: dict[str, str] = Field(default_factory=dict)
+
+
+class DesignStageInput(StrictModel):
+    """Input for the design stage child workflow."""
+
+    job_id: str
+    markdown_spec: str
+    max_twf_revisions: int
+    durable_agents: bool
 
 
 class SpecBuilderInput(StrictModel):

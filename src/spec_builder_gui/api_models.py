@@ -37,6 +37,7 @@ StageName = Literal[
     "draft",
     "best_practices_review",
     "supervisor",
+    "design",
 ]
 StageExecutionStatus = Literal["not_started", "running", "completed", "failed", "skipped"]
 ReviewAction = Literal["approve", "reject", "feedback", "force_finalize", "cancel"]

@@ -5,6 +5,10 @@ Build each `StepAgent` at import time, in a module the workflow imports under
 `__pydantic_ai_agents__`. Stage code calls `run_step`; `durable` picks whether each model and
 tool call is its own activity or the whole run is one.
 
+A model given as a string resolves inside the model-request activity, not when the agent is built,
+so a process without that provider's key still imports it. `_build_model` is the one seam a test
+patches to put a stub `Model` behind the real model string.
+
 An agent's MCP connection binds to the first event loop that runs it. A process that needs more than
 one loop (tests, say) builds its transport with `StdioTransport(..., keep_alive=False)` instead.
 """
@@ -22,12 +26,12 @@ from temporalio.workflow import ActivityConfig
 with workflow.unsafe.imports_passed_through():
     from fastmcp.client.transports import StdioTransport
     from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
-    from pydantic_ai.capabilities import LocalWorkspace
+    from pydantic_ai.capabilities import LocalWorkspace, ResolveModelId
     from pydantic_ai.durable_exec.temporal import TemporalDurability
     from pydantic_ai.mcp import MCPToolset
     from pydantic_ai.messages import ModelMessage  # noqa: TC002 -- pydantic resolves it at runtime
-    from pydantic_ai.models import Model  # noqa: TC002 -- dataclass field type
-    from pydantic_ai_harness import Skills
+    from pydantic_ai.models import Model, infer_model  # noqa: TC002 -- Model is a field type
+    from pydantic_ai_harness import FileSystem, Skills
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,7 +54,8 @@ class StepAgentSpec:
     name: str  # unique; prefixes the agent's activity names
     model: str | Model  # a `provider:model` string; a `Model` in tests
     instructions: str
-    skills_dir: Path | None = None  # each subdirectory holds a SKILL.md
+    skills_dir: Path | None = None  # each subdirectory holds a SKILL.md; read-only to the agent
+    skills: frozenset[str] | None = None  # names offered from `skills_dir`; None offers all
     mcp_servers: tuple[McpServer, ...] = ()
     timeout: timedelta = timedelta(minutes=5)  # per call when durable, the whole run when plain
 
@@ -83,6 +88,10 @@ class StepResult(BaseModel):
 _REGISTRY: dict[str, StepAgent] = {}
 
 
+def _build_model(model_id: str) -> Model:
+    return infer_model(model_id)
+
+
 def _toolset(server: McpServer) -> MCPToolset:
     toolset = MCPToolset(
         StdioTransport(command=server.command, args=list(server.args)), id=server.id
@@ -101,16 +110,24 @@ class StepAgent:
         """Build the agent and register it under `spec.name`."""
         capabilities: list = []
         if spec.skills_dir is not None:
-            capabilities += [LocalWorkspace(spec.skills_dir.parent), Skills(spec.skills_dir.name)]
-        capabilities.append(
-            TemporalDurability(activity_config=ActivityConfig(start_to_close_timeout=spec.timeout))
-        )
+            # Rooted at `skills_dir`, not one skill, because skills link to each other's
+            # `reference/` files; `FileSystem` lets the agent read them.
+            capabilities += [
+                LocalWorkspace(spec.skills_dir, read_only=True),
+                Skills(".", include=spec.skills),
+                FileSystem(),
+            ]
+        capabilities += [
+            ResolveModelId(lambda _ctx, model_id: _build_model(model_id)),
+            TemporalDurability(activity_config=ActivityConfig(start_to_close_timeout=spec.timeout)),
+        ]
         if spec.name in _REGISTRY:
             msg = f"Step agent {spec.name!r} is already registered."
             raise ValueError(msg)
         self.spec = spec
         self.agent = Agent(
             spec.model,
+            defer_model_check=True,
             name=spec.name,
             instructions=spec.instructions,
             output_type=[str, DeferredToolRequests],
