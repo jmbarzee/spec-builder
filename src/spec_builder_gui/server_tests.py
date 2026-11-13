@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -734,3 +736,106 @@ async def test_post_jobs_should_keep_the_stage_list_unchanged_when_architecture_
             "best_practices_review",
             "supervisor",
         ]
+
+
+TWF_DESIGN = 'workflow Foo():\n\tactivity Bar()\n\nactivity Bar() -> (string):\n\treturn "x"\n'
+
+
+def write_twf_files(directory: Path) -> dict[str, str]:
+    """Write a design and its real `twf parse` and `twf graph --json` output."""
+    directory.mkdir(parents=True)
+    source = directory / "design.twf"
+    source.write_text(TWF_DESIGN, encoding="utf-8")
+    parse = directory / "parse.json"
+    graph = directory / "graph.json"
+    for output, args in ((parse, ["parse"]), (graph, ["graph", "--json"])):
+        output.write_text(
+            subprocess.run(
+                ["twf", *args, str(source)], check=True, capture_output=True, text=True
+            ).stdout,
+            encoding="utf-8",
+        )
+    return {
+        "twf_source": path_to_uri(source),
+        "twf_parse_json": path_to_uri(parse),
+        "twf_graph_json": path_to_uri(graph),
+    }
+
+
+def save_job(
+    service: SpecBuilderGuiService,
+    job_id: str,
+    *,
+    architecture_mode: bool,
+    artifact_uris: dict[str, str] | None = None,
+) -> None:
+    """Persist a minimal job record."""
+    now = datetime.now(tz=timezone.utc)
+    service.job_store.save_job(
+        StoredJobRecord(
+            job_id=job_id,
+            workflow_id=f"spec-builder-ui-{job_id}",
+            project_name="Design",
+            created_at=now,
+            updated_at=now,
+            output_directory="/tmp/out",
+            status="completed",
+            current_phase="completed",
+            architecture_mode=architecture_mode,
+            artifact_uris=artifact_uris or {},
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_twf_should_return_source_and_visualizer_payload(tmp_path: Path) -> None:
+    """The design endpoint returns the source, the parse envelope and the graph."""
+    uris = write_twf_files(tmp_path / "twf")
+    async with app_client(tmp_path) as (client, service, _gateway):
+        save_job(service, "job-twf", architecture_mode=True, artifact_uris=uris)
+
+        response = await client.get("/api/jobs/job-twf/twf")
+        body = await response.json()
+
+        assert response.status == 200
+        assert body["source"] == TWF_DESIGN
+        assert body["parse"] == json.loads((tmp_path / "twf" / "parse.json").read_text())
+        assert body["graph"] == json.loads((tmp_path / "twf" / "graph.json").read_text())["graph"]
+        assert {node["name"] for node in body["graph"]["nodes"]} >= {"Foo", "Bar"}
+
+
+@pytest.mark.asyncio
+async def test_get_twf_should_404_until_the_design_exists(tmp_path: Path) -> None:
+    """A job without a design, or without architecture mode, or an unknown job is a 404."""
+    uris = write_twf_files(tmp_path / "twf")
+    async with app_client(tmp_path) as (client, service, _gateway):
+        save_job(service, "job-pending", architecture_mode=True)
+        save_job(service, "job-plain", architecture_mode=False, artifact_uris=uris)
+        save_job(
+            service,
+            "job-missing",
+            architecture_mode=True,
+            artifact_uris={**uris, "twf_graph_json": path_to_uri(tmp_path / "gone.json")},
+        )
+
+        for job_id in ("job-pending", "job-plain", "job-missing", "job-unknown"):
+            response = await client.get(f"/api/jobs/{job_id}/twf")
+            assert response.status == 404, job_id
+            assert "error" in await response.json()
+
+
+@pytest.mark.asyncio
+async def test_get_job_detail_and_list_should_report_architecture_mode(tmp_path: Path) -> None:
+    """Both job views carry the mode so the frontend can decide on the design panel."""
+    async with app_client(tmp_path) as (client, service, _gateway):
+        save_job(service, "job-arch", architecture_mode=True)
+        save_job(service, "job-plain", architecture_mode=False)
+
+        detail = await (await client.get("/api/jobs/job-arch")).json()
+        listing = await (await client.get("/api/jobs")).json()
+
+        assert detail["architectureMode"] is True
+        assert {item["jobId"]: item["architectureMode"] for item in listing["items"]} == {
+            "job-arch": True,
+            "job-plain": False,
+        }

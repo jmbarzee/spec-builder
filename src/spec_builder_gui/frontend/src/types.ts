@@ -92,6 +92,7 @@ export type JobSummary = {
   status: JobStatus;
   currentPhase: WorkflowPhase;
   iteration: number;
+  architectureMode: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -104,6 +105,7 @@ export type JobDetail = {
   status: JobStatus;
   currentPhase: WorkflowPhase;
   iteration: number;
+  architectureMode: boolean;
   createdAt: string;
   updatedAt: string;
   outputDirectory: string;
@@ -188,4 +190,10 @@ export type PickOutputDirectoryResponse = {
 
 export type SystemFeatures = {
   architectureMode: boolean;
+};
+
+export type TwfDesign = {
+  source: string;
+  parse: Record<string, unknown>;
+  graph: Record<string, unknown>;
 };

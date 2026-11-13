@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -100,6 +100,7 @@ class JobSummary(ApiModel):
     status: GuiJobStatus
     current_phase: WorkflowPhase
     iteration: int
+    architecture_mode: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -114,6 +115,7 @@ class JobDetail(ApiModel):
     status: GuiJobStatus
     current_phase: WorkflowPhase
     iteration: int
+    architecture_mode: bool = False
     created_at: datetime
     updated_at: datetime
     output_directory: str
@@ -218,6 +220,14 @@ class SystemFeatures(ApiModel):
     """Optional capabilities this deployment offers."""
 
     architecture_mode: bool
+
+
+class TwfDesign(ApiModel):
+    """A job's `.twf` design: its source and the visualizer payload from `twf`."""
+
+    source: str
+    parse: dict[str, Any]
+    graph: dict[str, Any]
 
 
 class StoredJobRecord(ApiModel):

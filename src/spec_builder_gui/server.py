@@ -147,6 +147,13 @@ async def download_spec(request: web.Request) -> web.StreamResponse:
     return response
 
 
+async def get_twf_design(request: web.Request) -> web.Response:
+    """Handle `.twf` design requests."""
+    service = await get_service(request)
+    design = await service.get_twf_design(request.match_info["job_id"])
+    return json_response(design)
+
+
 async def get_features(request: web.Request) -> web.Response:
     """Handle system feature discovery requests."""
     service = await get_service(request)
@@ -190,6 +197,7 @@ def create_app(
     app.router.add_post("/api/jobs/{job_id}/revise", create_revision)
     app.router.add_post("/api/jobs/{job_id}/approve-revision", approve_revision_as_final)
     app.router.add_get("/api/jobs/{job_id}/download", download_spec)
+    app.router.add_get("/api/jobs/{job_id}/twf", get_twf_design)
     app.router.add_get("/api/system/features", get_features)
     app.router.add_post("/api/system/pick-output-directory", pick_output_directory)
 

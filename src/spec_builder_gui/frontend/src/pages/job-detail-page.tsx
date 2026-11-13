@@ -2,6 +2,7 @@ import { startTransition, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api";
+import { DesignPanel } from "../components/design-panel";
 import { MarkdownPanel } from "../components/markdown-panel";
 import { ReviewActions } from "../components/review-actions";
 import { StatusBadge } from "../components/status-badge";
@@ -256,6 +257,10 @@ export function JobDetailPage() {
         <MarkdownPanel title="Current Draft" markdown={detail.currentDraftMarkdown} />
         <MarkdownPanel title="Final Spec" markdown={detail.finalSpecMarkdown} />
       </div>
+
+      {detail.architectureMode ? (
+        <DesignPanel jobId={detail.jobId} designUri={detail.artifactUris.twf_source} />
+      ) : null}
 
       <ReviewActions detail={detail} onSubmit={handleReviewAction} />
 
