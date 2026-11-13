@@ -55,11 +55,13 @@ function buildDetail(overrides: Partial<JobDetail> = {}): JobDetail {
       uncoveredClaims: [],
     },
     pendingHumanAction: "approval",
+    pendingToolCalls: [],
     finalWorkflowStatus: null,
     artifactUris: {},
     canApprove: true,
     canReject: true,
     canProvideFeedback: false,
+    canDecideToolCalls: false,
     canForceFinalize: false,
     canDownload: false,
     canCreateRevision: false,
@@ -115,6 +117,59 @@ describe("JobDetailPage", () => {
       );
     });
     expect(screen.getByText("Acquire Content")).toBeInTheDocument();
+  });
+
+  test("should send one decision for every held tool call", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const held = buildDetail({
+      pendingHumanAction: "tool_approval",
+      canApprove: false,
+      canReject: false,
+      canDecideToolCalls: true,
+      pendingToolCalls: [
+        { toolCallId: "c1", toolName: "write_note", args: '{"text":"alpha"}' },
+        { toolCallId: "c2", toolName: "write_note", args: '{"text":"beta"}' },
+      ],
+    });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(held))
+      .mockResolvedValueOnce(jsonResponse(buildDetail({ canDecideToolCalls: false })));
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter
+        initialEntries={["/jobs/job-1"]}
+        future={{
+          v7_relativeSplatPath: true,
+          v7_startTransition: true,
+        }}
+      >
+        <Routes>
+          <Route path="/jobs/:jobId" element={<JobDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const send = await screen.findByRole("button", { name: "Send Decisions" });
+    expect(send).toBeDisabled();
+
+    const [approveFirst, approveSecond] = screen.getAllByLabelText(/^Approve write_note/);
+    const [, denySecond] = screen.getAllByLabelText(/^Deny write_note/);
+    await user.click(approveFirst);
+    expect(send).toBeDisabled();
+    await user.click(denySecond);
+    expect(approveSecond).not.toBeChecked();
+    await user.click(send);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/jobs/job-1/tool-decisions",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ decisions: { c1: true, c2: false } }),
+        }),
+      );
+    });
   });
 
   test("should retry detail polling after a transient load failure", async () => {

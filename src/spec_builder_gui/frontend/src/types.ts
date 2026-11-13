@@ -20,7 +20,7 @@ export type WorkflowPhase =
   | "cancelled"
   | "failed";
 
-export type PendingHumanAction = "clarification" | "approval" | null;
+export type PendingHumanAction = "clarification" | "approval" | "tool_approval" | null;
 
 export type UploadedArtifact = {
   artifactId: string;
@@ -38,8 +38,14 @@ export type ReviewFeedbackEntry = {
   id: string;
   createdAt: string;
   author: string;
-  kind: "feedback" | "approval" | "rejection" | "force_finalize" | "cancel";
+  kind: "feedback" | "approval" | "rejection" | "force_finalize" | "cancel" | "tool_decision";
   text?: string | null;
+};
+
+export type PendingToolCall = {
+  toolCallId: string;
+  toolName: string;
+  args: string;
 };
 
 export type StageState = {
@@ -120,11 +126,13 @@ export type JobDetail = {
   currentDraftMetadata?: DraftMetadata | null;
   traceabilitySummary?: TraceabilitySummary | null;
   pendingHumanAction: PendingHumanAction;
+  pendingToolCalls: PendingToolCall[];
   finalWorkflowStatus?: "completed" | "needs_clarification" | "failed" | "cancelled" | null;
   artifactUris: Record<string, string>;
   canApprove: boolean;
   canReject: boolean;
   canProvideFeedback: boolean;
+  canDecideToolCalls: boolean;
   canForceFinalize: boolean;
   canDownload: boolean;
   canCreateRevision: boolean;
@@ -169,6 +177,10 @@ export type ListJobsResponse = {
 export type SubmitReviewRequest = {
   action: "approve" | "reject" | "feedback" | "force_finalize" | "cancel";
   text?: string;
+};
+
+export type DecideToolCallsRequest = {
+  decisions: Record<string, boolean>;
 };
 
 export type CreateRevisionRequest = {

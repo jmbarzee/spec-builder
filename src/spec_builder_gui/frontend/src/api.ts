@@ -3,6 +3,7 @@ import type {
   CreateJobResponse,
   CreateRevisionRequest,
   CreateRevisionResponse,
+  DecideToolCallsRequest,
   JobDetail,
   ListJobsResponse,
   PickOutputDirectoryResponse,
@@ -70,6 +71,13 @@ export const api = {
   },
   submitReview(jobId: string, payload: SubmitReviewRequest): Promise<JobDetail> {
     return requestJson<JobDetail>(`/api/jobs/${jobId}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  },
+  decideToolCalls(jobId: string, payload: DecideToolCallsRequest): Promise<JobDetail> {
+    return requestJson<JobDetail>(`/api/jobs/${jobId}/tool-decisions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

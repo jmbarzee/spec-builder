@@ -30,6 +30,7 @@ from src.workflows.spec_builder.custom_types import (
     TraceabilityEntry,
     TraceabilitySummary,
 )
+from src.workflows.spec_builder.step_agent import HeldCall
 
 
 def build_draft() -> DraftSpecOutput:
@@ -74,6 +75,7 @@ def build_running_snapshot(
     *,
     phase: str = "draft",
     pending_human_action: str | None = None,
+    pending_tool_calls: list[HeldCall] | None = None,
     best_practices_violations: list[BestPracticesViolation] | None = None,
 ) -> LiveWorkflowSnapshot:
     """Build a running workflow snapshot for GUI tests."""
@@ -89,6 +91,7 @@ def build_running_snapshot(
             draft_restarts=0,
             restart_point="draft" if phase == "draft" else "acquire",
             pending_human_action=pending_human_action,
+            pending_tool_calls=pending_tool_calls or [],
             open_questions=["Should approval be required?"],
             warnings=[],
             artifact_uris={
@@ -167,6 +170,7 @@ class FakeTemporalGateway:
         self.reject_calls: list[tuple[str, str, str]] = []
         self.feedback_calls: list[tuple[str, str]] = []
         self.cancel_calls: list[tuple[str, str]] = []
+        self.tool_decision_calls: list[tuple[str, dict[str, bool]]] = []
 
     async def start_workflow(
         self,
@@ -202,6 +206,9 @@ class FakeTemporalGateway:
         if "feedback" in self.action_errors:
             raise self.action_errors["feedback"]
         self.feedback_calls.append((workflow_id, clarification))
+
+    async def decide_tool_calls(self, workflow_id: str, *, decisions: dict[str, bool]) -> None:
+        self.tool_decision_calls.append((workflow_id, decisions))
 
     async def cancel(self, workflow_id: str, *, reason: str) -> None:
         if "cancel" in self.action_errors:
@@ -345,6 +352,87 @@ async def test_get_job_detail_should_fall_back_to_stored_state_when_refresh_fail
         assert detail_payload["currentPhase"] == "draft"
         assert detail_payload["currentDraftMarkdown"].startswith("# Cached draft")
         assert detail_payload["lastError"] == "Temporal query unavailable"
+
+
+@pytest.mark.asyncio
+async def test_tool_decisions_should_show_held_calls_and_signal_one_decision_for_each(
+    tmp_path: Path,
+) -> None:
+    """A held job lists its pending calls and takes one decision for all of them."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Held Calls",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(
+            job_id,
+            phase="waiting_for_approval",
+            pending_human_action="tool_approval",
+            pending_tool_calls=[
+                HeldCall(tool_call_id="c1", tool_name="write_note", args='{"text": "alpha"}'),
+                HeldCall(tool_call_id="c2", tool_name="write_note", args='{"text": "beta"}'),
+            ],
+        )
+
+        detail = await (await client.get(f"/api/jobs/{job_id}")).json()
+        partial = await client.post(
+            f"/api/jobs/{job_id}/tool-decisions", json={"decisions": {"c1": True}}
+        )
+        decided = await client.post(
+            f"/api/jobs/{job_id}/tool-decisions",
+            json={"decisions": {"c1": True, "c2": False}},
+        )
+        decided_payload = await decided.json()
+
+        assert detail["canDecideToolCalls"] is True
+        assert [call["toolCallId"] for call in detail["pendingToolCalls"]] == ["c1", "c2"]
+        assert detail["pendingToolCalls"][0]["args"] == '{"text": "alpha"}'
+        assert partial.status == 400
+        assert decided.status == 200
+        assert gateway.tool_decision_calls == [
+            (record.workflow_id, {"c1": True, "c2": False})
+        ]
+        assert decided_payload["reviewFeedbackHistory"][-1]["text"] == (
+            "approved write_note; denied write_note"
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_decisions_should_be_refused_when_no_calls_are_held(tmp_path: Path) -> None:
+    """A job that is not holding tool calls rejects decisions."""
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, service, gateway):
+        artifact = await upload_test_artifact(client)
+        created = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="No Hold",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+        job_id = (await created.json())["jobId"]
+        record = service.job_store.get_job(job_id)
+        assert record is not None
+        gateway.snapshots[record.workflow_id] = build_running_snapshot(job_id)
+
+        response = await client.post(
+            f"/api/jobs/{job_id}/tool-decisions", json={"decisions": {}}
+        )
+
+        assert response.status == 400
+        assert gateway.tool_decision_calls == []
 
 
 @pytest.mark.asyncio

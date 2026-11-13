@@ -227,6 +227,8 @@ Stages run agents on [Pydantic AI](https://pydantic.dev/docs/ai/) through [`step
 
 The GUI reads the variable when it starts a job and records it in the job's `durable_agents` option, so changing it never alters a job already running.
 
+An MCP tool marked `approval_required` holds its stage: the job detail page lists the pending calls, and one decision for every call resumes the stage. An unanswered hold ends the job as `needs_clarification` 24 hours after it began, even across continue-as-new.
+
 ### Package Layout
 
 - [`src/workflows/spec_builder/custom_types.py`](./src/workflows/spec_builder/custom_types.py): typed Pydantic contracts for workflow state, signals, queries, and stage outputs
