@@ -1120,6 +1120,11 @@ dependencies = [
     { name = "temporalio" },
 ]
 
+[package.optional-dependencies]
+architecture = [
+    { name = "twf-cli" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "poethepoet" },
@@ -1138,7 +1143,9 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.12.4" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "temporalio", specifier = ">=1.35" },
+    { name = "twf-cli", marker = "extra == 'architecture'", specifier = "==0.17.0" },
 ]
+provides-extras = ["architecture"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1179,6 +1186,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
+]
+
+[[package]]
+name = "twf-cli"
+version = "0.17.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/e4/f57ce6a2500ed6a24d0af2f2f1d9a4c0caab4216f0e7394eef01abdea4a4/twf_cli-0.17.0-py3-none-macosx_10_15_x86_64.whl", hash = "sha256:f873e1ef2622ac8e337ebef597a127ee414e123b9a95dac322ed3d15cfeda2be", size = 8804449, upload-time = "2026-11-11T02:54:24.309Z" },
+    { url = "https://files.pythonhosted.org/packages/28/57/555f9b158e889f6d726002b092d3ae14fa359f47a9a324c5bdb37984c7e2/twf_cli-0.17.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:29fd6a70d8d41c385b4eecc07b2c3df4dbea5e4762a9512523ac6f05f45b4c08", size = 8253969, upload-time = "2026-11-11T02:54:26.512Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/f9/7978caa771327b1a43ea15826ec881622fa3037f8bd4c1d683f149d87417/twf_cli-0.17.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:e418e825471efcfddfd3b1948dd696e6528bc4663d565e8a70848851b219c9b5", size = 7834478, upload-time = "2026-11-11T02:54:27.788Z" },
+    { url = "https://files.pythonhosted.org/packages/58/f9/cbf4e9495675bbe9668835a281ed91f0e3cfaa9f0ca9c3fced9e95c29807/twf_cli-0.17.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:56ebd172b6769a19b7c485120e4b5318d646d632b3929819332fcc7833ff95ae", size = 8549542, upload-time = "2026-11-11T02:54:29.375Z" },
+    { url = "https://files.pythonhosted.org/packages/20/33/6ef915afc2a8ae7f2b33f7025ce88837b5d4834a60cfbe72202f103c7328/twf_cli-0.17.0-py3-none-win_amd64.whl", hash = "sha256:a4f4c6dee489cc9f1193d8130db86f717f24f7941cb38d33751b24b46fd59e67", size = 8698884, upload-time = "2026-11-11T02:54:31.291Z" },
 ]
 
 [[package]]

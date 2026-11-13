@@ -7,6 +7,7 @@ import type {
   ListJobsResponse,
   PickOutputDirectoryResponse,
   SubmitReviewRequest,
+  SystemFeatures,
   UploadArtifactResponse,
 } from "./types";
 
@@ -81,6 +82,9 @@ export const api = {
     return requestJson<JobDetail>(`/api/jobs/${jobId}/approve-revision`, {
       method: "POST",
     });
+  },
+  getFeatures(): Promise<SystemFeatures> {
+    return requestJson<SystemFeatures>("/api/system/features");
   },
   pickOutputDirectory(): Promise<PickOutputDirectoryResponse> {
     return requestJson<PickOutputDirectoryResponse>("/api/system/pick-output-directory", {

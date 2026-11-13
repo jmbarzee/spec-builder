@@ -140,6 +140,7 @@ export type CreateJobRequest = {
   artifactIds: string[];
   userIntent?: string;
   requireHumanApproval?: boolean;
+  architectureMode?: boolean;
   outputTargets?: Array<"markdown_spec" | "structured_json">;
 };
 
@@ -183,4 +184,8 @@ export type PickOutputDirectoryResponse = {
   supported: boolean;
   cancelled: boolean;
   path?: string | null;
+};
+
+export type SystemFeatures = {
+  architectureMode: boolean;
 };

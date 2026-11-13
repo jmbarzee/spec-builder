@@ -152,6 +152,7 @@ class CreateJobRequest(ApiModel):
     artifact_ids: list[str]
     user_intent: str | None = None
     require_human_approval: bool = True
+    architecture_mode: bool = False
     output_targets: list[OutputTarget] = Field(
         default_factory=lambda: ["markdown_spec", "structured_json"]
     )
@@ -213,6 +214,12 @@ class PickOutputDirectoryResponse(ApiModel):
     path: str | None = None
 
 
+class SystemFeatures(ApiModel):
+    """Optional capabilities this deployment offers."""
+
+    architecture_mode: bool
+
+
 class StoredJobRecord(ApiModel):
     """Filesystem-backed job record persisted by the GUI backend."""
 
@@ -241,6 +248,7 @@ class StoredJobRecord(ApiModel):
     stages: list[StageState] = Field(default_factory=list)
     user_intent: str | None = None
     require_human_approval: bool = True
+    architecture_mode: bool = False
     output_targets: list[OutputTarget] = Field(
         default_factory=lambda: ["markdown_spec", "structured_json"]
     )

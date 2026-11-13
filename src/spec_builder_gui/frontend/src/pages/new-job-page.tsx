@@ -1,4 +1,4 @@
-import { startTransition, useMemo, useState } from "react";
+import { startTransition, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api";
@@ -21,6 +21,8 @@ export function NewJobPage() {
   const [userIntent, setUserIntent] = useState("");
   const [outputDirectory, setOutputDirectory] = useState("");
   const [requireHumanApproval, setRequireHumanApproval] = useState(true);
+  const [architectureMode, setArchitectureMode] = useState(false);
+  const [architectureAvailable, setArchitectureAvailable] = useState(false);
   const [uploads, setUploads] = useState<LocalUploadItem[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitPending, setSubmitPending] = useState(false);
@@ -30,6 +32,13 @@ export function NewJobPage() {
     () => uploads.filter((upload) => upload.state === "uploaded" && upload.artifactId),
     [uploads],
   );
+
+  useEffect(() => {
+    api
+      .getFeatures()
+      .then((features) => setArchitectureAvailable(features.architectureMode))
+      .catch(() => setArchitectureAvailable(false));
+  }, []);
 
   async function handleFileSelection(fileList: FileList | null) {
     if (!fileList) {
@@ -124,6 +133,7 @@ export function NewJobPage() {
         artifactIds: uploadedArtifacts.map((artifact) => artifact.artifactId!),
         userIntent: userIntent.trim() || undefined,
         requireHumanApproval,
+        architectureMode: architectureAvailable && architectureMode,
         outputTargets: ["markdown_spec", "structured_json"],
       });
       startTransition(() => {
@@ -219,6 +229,17 @@ export function NewJobPage() {
             />
             <span>Require human approval before the workflow finalizes output.</span>
           </label>
+
+          {architectureAvailable ? (
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={architectureMode}
+                onChange={(event) => setArchitectureMode(event.target.checked)}
+              />
+              <span>Architecture mode: also design the system in .twf.</span>
+            </label>
+          ) : null}
 
           {formError ? <p className="inline-error">{formError}</p> : null}
 

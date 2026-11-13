@@ -12,6 +12,9 @@ dependencies = [
     "python-dotenv>=1.2.2",
 ]
 
+[project.optional-dependencies]
+architecture = ["twf-cli==0.17.0"]
+
 [dependency-groups]
 dev = [
     "poethepoet==0.42.1",
