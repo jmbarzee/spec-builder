@@ -22,6 +22,7 @@ function buildDetail(overrides: Partial<JobDetail> = {}): JobDetail {
     status: "waiting_for_human",
     currentPhase: "waiting_for_approval",
     iteration: 1,
+    architectureMode: false,
     createdAt: "2026-04-02T10:00:00Z",
     updatedAt: "2026-04-02T10:02:00Z",
     outputDirectory: "/tmp/out",

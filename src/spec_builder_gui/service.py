@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import mimetypes
 import os
 import re
@@ -35,6 +36,7 @@ from src.spec_builder_gui.api_models import (
     StoredJobRecord,
     SubmitReviewRequest,
     SystemFeatures,
+    TwfDesign,
     UploadedArtifact,
     UploadArtifactResponse,
 )
@@ -98,6 +100,7 @@ ALLOWED_UPLOADS = {
     ".webp": ("image", "image", {"image/webp"}),
 }
 ARCHITECTURE_MODE_ENV = "SPEC_BUILDER_ARCHITECTURE_MODE"
+TWF_ARTIFACT_KEYS = ("twf_source", "twf_parse_json", "twf_graph_json")
 ACTIVE_JOB_STATUSES = {"queued", "running", "waiting_for_human"}
 CLOSED_JOB_STATUSES = {"completed", "failed", "cancelled"}
 
@@ -407,6 +410,7 @@ class SpecBuilderGuiService:
             status=record.status,
             current_phase=record.current_phase,
             iteration=record.iteration,
+            architecture_mode=record.architecture_mode,
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
@@ -449,6 +453,7 @@ class SpecBuilderGuiService:
             status=record.status,
             current_phase=record.current_phase,
             iteration=record.iteration,
+            architecture_mode=record.architecture_mode,
             created_at=record.created_at,
             updated_at=record.updated_at,
             output_directory=record.output_directory,
@@ -935,6 +940,26 @@ class SpecBuilderGuiService:
         return (
             uri_to_path(download_uri),
             self._sanitize_download_name(record.project_name),
+        )
+
+    async def get_twf_design(self, job_id: str) -> TwfDesign:
+        """Return an architecture-mode job's `.twf` source and visualizer payload."""
+        record = self.job_store.get_job(job_id)
+        if record is None:
+            raise GuiServiceError("Job not found.", status_code=404)
+        uris = [record.artifact_uris.get(key) for key in TWF_ARTIFACT_KEYS]
+        paths = [uri_to_path(uri) for uri in uris if uri]
+        if (
+            not record.architecture_mode
+            or len(paths) != len(TWF_ARTIFACT_KEYS)
+            or not all(path.exists() for path in paths)
+        ):
+            raise GuiServiceError("No design is available for this job.", status_code=404)
+        source, parse, graph = paths
+        return TwfDesign(
+            source=source.read_text(encoding="utf-8"),
+            parse=json.loads(parse.read_text(encoding="utf-8")),
+            graph=json.loads(graph.read_text(encoding="utf-8"))["graph"],
         )
 
     def get_features(self) -> SystemFeatures:

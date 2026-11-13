@@ -8,6 +8,7 @@ import type {
   PickOutputDirectoryResponse,
   SubmitReviewRequest,
   SystemFeatures,
+  TwfDesign,
   UploadArtifactResponse,
 } from "./types";
 
@@ -63,6 +64,9 @@ export const api = {
   },
   getJobDetail(jobId: string): Promise<JobDetail> {
     return requestJson<JobDetail>(`/api/jobs/${jobId}`);
+  },
+  getTwfDesign(jobId: string): Promise<TwfDesign> {
+    return requestJson<TwfDesign>(`/api/jobs/${jobId}/twf`);
   },
   submitReview(jobId: string, payload: SubmitReviewRequest): Promise<JobDetail> {
     return requestJson<JobDetail>(`/api/jobs/${jobId}/review`, {
