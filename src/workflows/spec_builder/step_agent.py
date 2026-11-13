@@ -5,8 +5,9 @@ Build each `StepAgent` at import time, in a module the workflow imports under
 `__pydantic_ai_agents__`. Stage code calls `run_step`; `durable` picks whether each model and
 tool call is its own activity or the whole run is one.
 
-A model given as a string resolves inside the model-request activity, not when the agent is built,
-so a process without that provider's key still imports it. `_build_model` is the one seam a test
+A model given as a string resolves when a run starts, in the workflow and again in its
+model-request activity, not when the agent is built, so a process without that provider's key still
+imports it. `_build_model` is the one seam a test
 patches to put a stub `Model` behind the real model string.
 
 An agent's MCP connection binds to the first event loop that runs it. A process that needs more than
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 from temporalio.workflow import ActivityConfig
 
 with workflow.unsafe.imports_passed_through():
@@ -30,7 +32,7 @@ with workflow.unsafe.imports_passed_through():
     from pydantic_ai.durable_exec.temporal import TemporalDurability
     from pydantic_ai.mcp import MCPToolset
     from pydantic_ai.messages import ModelMessage  # noqa: TC002 -- pydantic resolves it at runtime
-    from pydantic_ai.models import Model, infer_model  # noqa: TC002 -- Model is a field type
+    from pydantic_ai.models import Model, infer_model
     from pydantic_ai_harness import FileSystem, Skills
 
 if TYPE_CHECKING:
@@ -177,5 +179,9 @@ async def run_step(request: StepRequest, *, durable: bool) -> StepResult:
     if durable or not workflow.in_workflow():
         return await agent.run(request)
     return await workflow.execute_activity(
-        run_step_agent, request, start_to_close_timeout=agent.spec.timeout
+        run_step_agent,
+        request,
+        start_to_close_timeout=agent.spec.timeout,
+        # A missing provider key will not fix itself on retry.
+        retry_policy=RetryPolicy(non_retryable_error_types=["UserError"]),
     )

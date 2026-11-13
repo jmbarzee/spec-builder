@@ -79,6 +79,25 @@ def test_check_skills_should_name_the_file_when_it_is_missing(skills_copy: Path)
         check_skills()
 
 
+@pytest.mark.parametrize("script", ["exit 1", "true"])
+def test_check_skills_should_raise_the_setup_error_when_twf_reports_no_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str
+) -> None:
+    """
+    Scenario: Broken twf
+    Given a `twf` that exits non-zero or prints nothing for `--version`
+    When the startup check runs
+    Then it raises the setup error with the install hint
+    """
+    fake = tmp_path / "twf"
+    fake.write_text(f"#!/bin/sh\n{script}\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+    with pytest.raises(ArchitectureSetupError, match="npm ci"):
+        check_skills()
+
+
 def test_skills_package_should_be_locked_at_the_twf_cli_version() -> None:
     """
     Scenario: One version

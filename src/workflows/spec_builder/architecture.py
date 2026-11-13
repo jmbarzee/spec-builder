@@ -33,9 +33,14 @@ def check_skills() -> None:
     if not manifest_path.is_file():
         raise ArchitectureSetupError(f"No skills manifest at {manifest_path}. {INSTALL_HINT}")
 
-    twf_version = subprocess.run(  # noqa: S603 -- `twf` resolved from PATH above
-        [twf, "--version"], capture_output=True, text=True, check=True
-    ).stdout.split()[-1]
+    try:
+        twf_version = subprocess.run(  # noqa: S603 -- `twf` resolved from PATH above
+            [twf, "--version"], capture_output=True, text=True, check=True
+        ).stdout.split()[-1]
+    except (subprocess.CalledProcessError, IndexError) as error:
+        raise ArchitectureSetupError(
+            f"`{twf} --version` did not report a version. {INSTALL_HINT}"
+        ) from error
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     skills_version = manifest["version"].removeprefix("v")
     if twf_version != skills_version:

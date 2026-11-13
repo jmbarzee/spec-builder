@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     LoadCapabilityReturnPart,
     ModelMessage,
@@ -282,3 +283,34 @@ def test_design_model_should_default_to_the_google_gemini_model(
 
     assert resolve_model("design") == "google:gemini-3.1-pro-preview"
     assert isinstance(model, GoogleModel)
+
+
+@pytest.mark.parametrize("durable", [True, False])
+@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.timeout(120)
+async def test_should_warn_and_complete_when_the_design_model_cannot_be_built(
+    client: Client,
+    designer: list[StubDesigner],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    durable: bool,
+) -> None:
+    """
+    Scenario: A model with no key
+    Given the design model's provider has no key
+    When the stage runs, durably or as one activity
+    Then the stage fails without retrying forever, and the job warns and completes
+    """
+
+    def no_key(_model_id: str) -> None:
+        msg = "no provider key"
+        raise UserError(msg)
+
+    monkeypatch.setattr(step_agent, "_build_model", no_key)
+
+    result, _scheduled, _children = await _run(client, _input(tmp_path, durable=durable))
+
+    assert result.status == "completed"
+    assert "Design stage failed" in result.warnings[0]
+    assert "no provider key" in result.warnings[0]
