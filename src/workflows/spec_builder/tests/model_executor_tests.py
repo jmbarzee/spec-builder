@@ -13,9 +13,10 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import BinaryContent, ModelMessage, ModelResponse, ToolCallPart
-from pydantic_ai.models import Model
+from pydantic_ai.models import Model, infer_model
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from src.workflows.spec_builder import model_executor
@@ -95,9 +96,9 @@ class TestResolveModel:
         Then it should get the Gemini model it used before settings existed
         """
         expected = (
-            "google-gla:gemini-embedding-001"
+            "google:gemini-embedding-001"
             if stage_name == "embedding"
-            else "google-gla:gemini-3.1-pro-preview"
+            else "google:gemini-3.1-pro-preview"
         )
 
         assert resolve_model(stage_name) == expected
@@ -202,19 +203,20 @@ class TestGenerateStructured:
         Scenario: Gemini requests through Pydantic AI
         Given a response model with defaults, optional fields and open-ended dict items
         When the default Gemini model generates against a stubbed HTTP endpoint
-        Then the request should carry only keys Gemini accepts, and the reply should parse
+        Then the request should be JSON response mode carrying only keys Gemini accepts,
+        and the reply should parse
         """
         requests: list[dict[str, Any]] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(json.loads(request.content))
-            call = {"name": "final_result", "args": {"contracts": [{"name": "SpecBuilderInput"}]}}
+            text = '{"contracts": [{"name": "SpecBuilderInput"}]}'
             return httpx.Response(
                 200,
                 json={
                     "candidates": [
                         {
-                            "content": {"role": "model", "parts": [{"functionCall": call}]},
+                            "content": {"role": "model", "parts": [{"text": text}]},
                             "finishReason": "STOP",
                         }
                     ]
@@ -240,8 +242,10 @@ class TestGenerateStructured:
         )
 
         assert result.contracts == [{"name": "SpecBuilderInput"}]
-        declarations = requests[0]["tools"][0]["functionDeclarations"]
-        schema = declarations[0]["parameters_json_schema"]
+        assert "tools" not in requests[0]
+        config = requests[0]["generationConfig"]
+        assert config["responseMimeType"] == "application/json"
+        schema = config["responseJsonSchema"]
         assert schema["properties"]["contracts"]["items"]["additionalProperties"]
         assert "default" not in _walk_keys(schema)
         assert schema["propertyOrdering"] == ["contracts", "optional_note"]
@@ -332,6 +336,26 @@ class TestGenerateStructured:
         assert "structured_extraction" in str(exc_info.value)
         assert len(str(exc_info.value)) < 1_400
         assert exc_info.value.__cause__ is None
+
+    @pytest.mark.parametrize("stage_name", [name for name in DEFAULT_MODELS if name != "embedding"])
+    def test_build_model_should_build_every_default_as_a_gemini_model_with_the_transformer(
+        self, monkeypatch: pytest.MonkeyPatch, stage_name: str
+    ) -> None:
+        """
+        Scenario: Defaults go through the real model builders
+        Given a dummy key and no network
+        When a stage's default spec resolves through `_build_model` and `infer_model`
+        Then both should yield a GoogleModel, and the first should carry the Gemini transformer
+        """
+        monkeypatch.setenv("GOOGLE_API_KEY", "dummy")
+        spec = resolve_model(stage_name)
+
+        built = model_executor._build_model(spec)
+        inferred = infer_model(spec)
+
+        assert isinstance(built, GoogleModel)
+        assert isinstance(inferred, GoogleModel)
+        assert built.profile["json_schema_transformer"] is model_executor._GeminiSchemaTransformer
 
     def test_build_model_should_resolve_a_second_provider_without_network(
         self, monkeypatch: pytest.MonkeyPatch

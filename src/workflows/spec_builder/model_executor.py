@@ -5,23 +5,23 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar
+from typing import Any, TypeVar
 
 from dotenv import find_dotenv, load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
 from pydantic_ai import Agent, BinaryContent
+from pydantic_ai._json_schema import JsonSchemaTransformer
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.profiles import ModelProfile
-from pydantic_ai.profiles.google import GoogleJsonSchemaTransformer
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.settings import ModelSettings
 
 T = TypeVar("T", bound=BaseModel)
 
-GEMINI_PROVIDER = "google-gla"
+GEMINI_PROVIDER = "google"
 DEFAULT_GENERATION_MODEL = f"{GEMINI_PROVIDER}:gemini-3.1-pro-preview"
 DEFAULT_MODELS = {
     "acquire_content": DEFAULT_GENERATION_MODEL,
@@ -34,7 +34,7 @@ DEFAULT_MODELS = {
     "embedding": f"{GEMINI_PROVIDER}:gemini-embedding-001",
 }
 MAX_EMBED_BATCH_SIZE = 100
-# Gemini rejects parts of full Pydantic JSON Schema, so Gemini requests keep only the keys it accepts.
+# Gemini rejects parts of full Pydantic JSON Schema, so its requests keep only the keys it accepts.
 SUPPORTED_JSON_SCHEMA_KEYS = frozenset(
     {
         "$id",
@@ -114,28 +114,30 @@ def resolve_model(stage_name: str) -> str:
     return spec
 
 
-class _GeminiSchemaTransformer(GoogleJsonSchemaTransformer):
+class _GeminiSchemaTransformer(JsonSchemaTransformer):
     """Project each schema node down to the subset Gemini accepts."""
 
     def transform(self, schema: dict[str, Any]) -> dict[str, Any]:
         if "$ref" in schema:
             # Pydantic may put sibling keys beside `$ref`, which Gemini rejects.
             return {key: value for key, value in schema.items() if key.startswith("$")}
-        schema = super().transform(schema)
         kept = {key: value for key, value in schema.items() if key in SUPPORTED_JSON_SCHEMA_KEYS}
-        if "properties" in kept and "propertyOrdering" not in kept:
+        if kept.get("properties") and "propertyOrdering" not in kept:
             # Declared field order keeps Gemini's output predictable and diffable.
             kept["propertyOrdering"] = list(kept["properties"])
         return kept
 
 
-def _gemini_model(
-    name: str, provider: GoogleProvider | Literal["google"] = "google"
-) -> GoogleModel:
+def _gemini_model(name: str, provider: GoogleProvider | None = None) -> GoogleModel:
     return GoogleModel(
         name,
-        provider=provider,
-        profile=ModelProfile(json_schema_transformer=_GeminiSchemaTransformer),
+        # `GEMINI_API_KEY` wins over `GOOGLE_API_KEY`, as it did before Pydantic AI.
+        provider=provider or GoogleProvider(api_key=os.getenv("GEMINI_API_KEY")),
+        profile=ModelProfile(
+            json_schema_transformer=_GeminiSchemaTransformer,
+            # JSON response mode with `responseJsonSchema`, as these stages always sent.
+            default_structured_output_mode="native",
+        ),
     )
 
 
@@ -175,10 +177,11 @@ class ModelExecutor:
         if self._client is None:
             # Retries are the executor's: one attempt per SDK call keeps failures Temporal-readable.
             self._client = genai.Client(
+                api_key=os.getenv("GEMINI_API_KEY"),
                 http_options=types.HttpOptions(
                     timeout=self._request_timeout_seconds * 1000,
                     retry_options=types.HttpRetryOptions(attempts=1),
-                )
+                ),
             )
         return self._client
 
@@ -197,6 +200,8 @@ class ModelExecutor:
         agent = Agent(
             _build_model(resolve_model(stage_name)),
             output_type=response_model,
+            # No output retries: the loop below owns retries, so each attempt is one request.
+            retries=0,
             instructions=system_instruction,
             model_settings=ModelSettings(
                 temperature=temperature,

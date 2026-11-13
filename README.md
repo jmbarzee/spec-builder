@@ -212,8 +212,8 @@ Required for the defaults:
 
 Optional overrides:
 
-- `SPEC_BUILDER_<STAGE>_MODEL`, for `ACQUIRE_CONTENT`, `STRUCTURED_EXTRACTION`, `INTENT_CLASSIFICATION`, `EXTRACTION_CRITIC`, `DRAFT_SPEC`, `BEST_PRACTICES_REVIEW` and `SUPERVISOR_DECISION` (default `google-gla:gemini-3.1-pro-preview`), for example `anthropic:claude-sonnet-4-5` with that provider's API key
-- `SPEC_BUILDER_EMBEDDING_MODEL` (default `google-gla:gemini-embedding-001`; only `google-gla` is supported)
+- `SPEC_BUILDER_<STAGE>_MODEL`, for `ACQUIRE_CONTENT`, `STRUCTURED_EXTRACTION`, `INTENT_CLASSIFICATION`, `EXTRACTION_CRITIC`, `DRAFT_SPEC`, `BEST_PRACTICES_REVIEW` and `SUPERVISOR_DECISION` (default `google:gemini-3.1-pro-preview`), for example `anthropic:claude-sonnet-4-5` with that provider's API key
+- `SPEC_BUILDER_EMBEDDING_MODEL` (default `google:gemini-embedding-001`; only `google` is supported)
 - `SPEC_BUILDER_MODEL_REQUEST_TIMEOUT_SECONDS` (default `60`)
 - `SPEC_BUILDER_MODEL_MAX_ATTEMPTS` (default `3`)
 

@@ -9,6 +9,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from temporalio.testing import ActivityEnvironment
 
+from src.workflows.spec_builder import model_executor
 from src.workflows.spec_builder.custom_types import (
     AcquireContentInput,
     AcquiredArtifact,
@@ -18,26 +19,25 @@ from src.workflows.spec_builder.custom_types import (
     BestPracticesReviewOutput,
     ClarificationRecord,
     CriticOutput,
-    DraftSpecOutput,
     DraftSpecInput,
+    DraftSpecOutput,
     ExtractionCriticInput,
     IntentClassificationInput,
     IntentClassificationOutput,
     PersistFinalOutputsInput,
     RunBestPracticesReviewActivityInput,
-    StructuredSpec,
-    StructuredSpecComponent,
+    StructuredEntity,
     StructuredExtractionInput,
     StructuredExtractionOutput,
-    StructuredEntity,
     StructuredFact,
     StructuredRelationship,
+    StructuredSpec,
+    StructuredSpecComponent,
     SupervisorDecision,
     SupervisorDecisionInput,
     TemporalBestPracticesReviewInput,
     TraceabilityEntry,
 )
-from src.workflows.spec_builder import model_executor
 from src.workflows.spec_builder.spec_builder_activities import (
     acquire_content,
     persist_final_outputs,
@@ -527,27 +527,32 @@ class TestSpecBuilderActivities:
                     missing_information=[],
                     recommended_action="proceed",
                 )
-            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, payload.model_dump())])
+            tool_name = info.output_tools[0].name
+            return ModelResponse(parts=[ToolCallPart(tool_name, payload.model_dump())])
 
         def build(spec: str) -> FunctionModel:
             requested.append(spec)
             return FunctionModel(respond)
 
-        monkeypatch.setenv("SPEC_BUILDER_INTENT_CLASSIFICATION_MODEL", "anthropic:claude-sonnet-4-5")
+        monkeypatch.setenv(
+            "SPEC_BUILDER_INTENT_CLASSIFICATION_MODEL", "anthropic:claude-sonnet-4-5"
+        )
         monkeypatch.setattr(model_executor, "_build_model", build)
         activity_environment = ActivityEnvironment()
         extraction = build_structured_extraction()
 
         intent = await activity_environment.run(
             run_intent_classification,
-            IntentClassificationInput(job_id="job-provider", extraction=extraction, user_intent="Spec it."),
+            IntentClassificationInput(
+                job_id="job-provider", extraction=extraction, user_intent="Spec it."
+            ),
         )
         await activity_environment.run(
             run_extraction_critic,
             ExtractionCriticInput(job_id="job-provider", extraction=extraction, intent=intent),
         )
 
-        assert requested == ["anthropic:claude-sonnet-4-5", "google-gla:gemini-3.1-pro-preview"]
+        assert requested == ["anthropic:claude-sonnet-4-5", "google:gemini-3.1-pro-preview"]
         assert intent.primary_intent == "implementation_spec"
 
     @pytest.mark.asyncio
