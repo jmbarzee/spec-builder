@@ -18,7 +18,9 @@ export function ToolApprovalPanel({ calls, onSubmit }: ToolApprovalPanelProps) {
     setPending(true);
     setError(null);
     try {
-      await onSubmit({ decisions });
+      await onSubmit({
+        decisions: Object.fromEntries(calls.map((call) => [call.toolCallId, decisions[call.toolCallId]])),
+      });
       setDecisions({});
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Tool decision failed.");

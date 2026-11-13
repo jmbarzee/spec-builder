@@ -150,7 +150,7 @@ async def _rolled_over(client: Client, handle: WorkflowHandle) -> WorkflowHandle
         run_id = (await client.get_workflow_handle(handle.id).describe()).run_id
         if run_id != handle.first_execution_run_id:
             break
-        await asyncio.sleep(0.05)  # noqa: ASYNC110 -- polls the server, not an in-process event
+        await asyncio.sleep(0.05)
     return client.get_workflow_handle(handle.id, run_id=run_id, result_type=SpecBuilderResult)
 
 
