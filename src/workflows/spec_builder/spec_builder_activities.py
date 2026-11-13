@@ -63,6 +63,7 @@ from src.workflows.spec_builder.prompts.activity_prompts import (
     build_supervisor_decision_prompt,
     build_supervisor_decision_system_instruction,
 )
+from src.workflows.spec_builder.step_agent import run_step_agent
 
 RUNTIME_ROOT = Path(".spec_builder_runtime")
 DEFAULT_CORPUS_PATH = Path("src/resources/sa_workflow_design_best_practices_critic_guide.md")
@@ -814,4 +815,5 @@ SPEC_BUILDER_ACTIVITIES = [
     run_supervisor_decision,
     persist_final_outputs,
     validate_twf_design,
+    run_step_agent,
 ]

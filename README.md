@@ -223,6 +223,14 @@ Optional overrides:
 - `SPEC_BUILDER_GEMINI_BEST_PRACTICES_REVIEW_MODEL`
 - `SPEC_BUILDER_GEMINI_SUPERVISOR_DECISION_MODEL`
 
+### Agent Runtime
+
+Stages run agents on [Pydantic AI](https://pydantic.dev/docs/ai/) through [`step_agent.py`](./src/workflows/spec_builder/step_agent.py). One environment variable picks how a job's agents run:
+
+- `SPEC_BUILDER_DURABLE_AGENTS` (default `true`): each model call and tool call is its own activity, so a retry resumes mid-run. Set it to `false` (or `0`, `no`) and the whole agent run is one activity, so a retry repeats the run.
+
+The GUI reads the variable when it starts a job and records it in the job's `durable_agents` option, so changing it never alters a job already running.
+
 ### Package Layout
 
 - [`src/workflows/spec_builder/custom_types.py`](./src/workflows/spec_builder/custom_types.py): typed Pydantic contracts for workflow state, signals, queries, and stage outputs
