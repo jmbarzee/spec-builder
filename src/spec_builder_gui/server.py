@@ -7,6 +7,7 @@ from aiohttp import web
 from src.spec_builder_gui.api_models import (
     CreateJobRequest,
     CreateRevisionRequest,
+    DecideToolCallsRequest,
     SubmitReviewRequest,
 )
 from src.spec_builder_gui.job_store import GuiJobStore
@@ -123,6 +124,14 @@ async def submit_review(request: web.Request) -> web.Response:
     return json_response(detail)
 
 
+async def decide_tool_calls(request: web.Request) -> web.Response:
+    """Handle tool-call decisions for a held job."""
+    service = await get_service(request)
+    payload = DecideToolCallsRequest.model_validate(await request.json())
+    detail = await service.decide_tool_calls(request.match_info["job_id"], payload)
+    return json_response(detail)
+
+
 async def create_revision(request: web.Request) -> web.Response:
     """Handle revision creation requests."""
     service = await get_service(request)
@@ -194,6 +203,7 @@ def create_app(
     app.router.add_get("/api/jobs", list_jobs)
     app.router.add_get("/api/jobs/{job_id}", get_job_detail)
     app.router.add_post("/api/jobs/{job_id}/review", submit_review)
+    app.router.add_post("/api/jobs/{job_id}/tool-decisions", decide_tool_calls)
     app.router.add_post("/api/jobs/{job_id}/revise", create_revision)
     app.router.add_post("/api/jobs/{job_id}/approve-revision", approve_revision_as_final)
     app.router.add_get("/api/jobs/{job_id}/download", download_spec)

@@ -25,10 +25,12 @@ from src.spec_builder_gui.api_models import (
     CreateJobResponse,
     CreateRevisionRequest,
     CreateRevisionResponse,
+    DecideToolCallsRequest,
     GuiJobStatus,
     JobDetail,
     JobSummary,
     ListJobsResponse,
+    PendingToolCall,
     PickOutputDirectoryResponse,
     ReviewFeedbackEntry,
     StageName,
@@ -46,6 +48,7 @@ from src.workflows.spec_builder.custom_types import (
     ArtifactInput,
     BestPracticesViolation,
     CancelJobInput,
+    DecideToolCallsInput,
     DraftSpecOutput,
     FinalStatus,
     ForceFinalizeDraftInput,
@@ -187,6 +190,8 @@ class TemporalGateway(Protocol):
 
     async def submit_clarification(self, workflow_id: str, *, clarification: str) -> None: ...
 
+    async def decide_tool_calls(self, workflow_id: str, *, decisions: dict[str, bool]) -> None: ...
+
     async def cancel(self, workflow_id: str, *, reason: str) -> None: ...
 
 
@@ -284,6 +289,14 @@ class TemporalSpecBuilderGateway:
                 request_id=f"clarify-{uuid.uuid4()}",
                 clarification=clarification,
             ),
+        )
+
+    async def decide_tool_calls(self, workflow_id: str, *, decisions: dict[str, bool]) -> None:
+        """Signal one decision for every pending tool call to the running workflow."""
+        handle = self.client.get_workflow_handle(workflow_id)
+        await handle.signal(
+            SpecBuilderWorkflow.decide_tool_calls,
+            DecideToolCallsInput(request_id=f"decide-tools-{uuid.uuid4()}", decisions=decisions),
         )
 
     async def cancel(self, workflow_id: str, *, reason: str) -> None:
@@ -436,6 +449,9 @@ class SpecBuilderGuiService:
             record.status == "waiting_for_human"
             and record.pending_human_action == "clarification"
         )
+        can_decide_tool_calls = (
+            record.status == "waiting_for_human" and record.pending_human_action == "tool_approval"
+        )
         can_force_finalize = (
             record.status in ACTIVE_JOB_STATUSES
             and record.current_draft_markdown is not None
@@ -474,11 +490,13 @@ class SpecBuilderGuiService:
             current_draft_metadata=record.current_draft_metadata,
             traceability_summary=record.traceability_summary,
             pending_human_action=record.pending_human_action,
+            pending_tool_calls=record.pending_tool_calls,
             final_workflow_status=record.final_workflow_status,
             artifact_uris=record.artifact_uris,
             can_approve=can_approve,
             can_reject=can_reject,
             can_provide_feedback=can_provide_feedback,
+            can_decide_tool_calls=can_decide_tool_calls,
             can_force_finalize=can_force_finalize,
             can_download=can_download,
             can_create_revision=can_create_revision,
@@ -625,6 +643,7 @@ class SpecBuilderGuiService:
             record.warnings = snapshot.result.warnings
             record.artifact_uris.update(snapshot.result.artifact_uris)
             record.pending_human_action = None
+            record.pending_tool_calls = []
             record.best_practices_violations = (
                 snapshot.result.best_practices_review.violations
                 if snapshot.result.best_practices_review is not None
@@ -645,6 +664,12 @@ class SpecBuilderGuiService:
             record.open_questions = snapshot.status.open_questions
             record.warnings = snapshot.status.warnings
             record.pending_human_action = snapshot.status.pending_human_action
+            record.pending_tool_calls = [
+                PendingToolCall(
+                    tool_call_id=call.tool_call_id, tool_name=call.tool_name, args=call.args
+                )
+                for call in snapshot.status.pending_tool_calls
+            ]
             record.artifact_uris.update(snapshot.status.artifact_uris)
             record.final_workflow_status = snapshot.status.final_status
             record.best_practices_violations = snapshot.best_practices_violations
@@ -806,12 +831,45 @@ class SpecBuilderGuiService:
             )
             self._append_review_entry(record, kind="cancel", text=reason)
 
+        return await self._save_and_refresh(record)
+
+    async def _save_and_refresh(self, record: StoredJobRecord) -> JobDetail:
         self.job_store.save_job(record)
         try:
-            record = await self.refresh_job(job_id)
+            record = await self.refresh_job(record.job_id)
         except Exception:  # noqa: BLE001
             pass
         return self._record_to_detail(record)
+
+    async def decide_tool_calls(self, job_id: str, request: DecideToolCallsRequest) -> JobDetail:
+        """Approve or deny every tool call the job is holding."""
+        record = self.job_store.get_job(job_id)
+        if record is None:
+            raise GuiServiceError("Job not found.", status_code=404)
+        if record.status not in ACTIVE_JOB_STATUSES:
+            raise GuiServiceError("Tool decisions are only available for active jobs.")
+        record = await self.refresh_job(job_id)
+        if record.pending_human_action != "tool_approval":
+            raise GuiServiceError("This job is not waiting for tool-call approval.")
+        if set(request.decisions) != {call.tool_call_id for call in record.pending_tool_calls}:
+            raise GuiServiceError("A decision is required for every pending tool call.")
+        await self._invoke_temporal_action(
+            "decide the pending tool calls",
+            lambda: self.temporal_gateway.decide_tool_calls(
+                record.workflow_id,
+                decisions=request.decisions,
+            ),
+        )
+        names = {call.tool_call_id: call.tool_name for call in record.pending_tool_calls}
+        self._append_review_entry(
+            record,
+            kind="tool_decision",
+            text="; ".join(
+                f"{'approved' if approved else 'denied'} {names[call_id]}"
+                for call_id, approved in request.decisions.items()
+            ),
+        )
+        return await self._save_and_refresh(record)
 
     def _create_text_artifact(
         self,

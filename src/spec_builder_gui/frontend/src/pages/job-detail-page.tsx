@@ -5,9 +5,10 @@ import { api } from "../api";
 import { DesignPanel } from "../components/design-panel";
 import { MarkdownPanel } from "../components/markdown-panel";
 import { ReviewActions } from "../components/review-actions";
+import { ToolApprovalPanel } from "../components/tool-approval-panel";
 import { StatusBadge } from "../components/status-badge";
 import { WorkflowTimeline } from "../components/workflow-timeline";
-import type { JobDetail, SubmitReviewRequest } from "../types";
+import type { DecideToolCallsRequest, JobDetail, SubmitReviewRequest } from "../types";
 
 function formatTimestamp(timestamp: string) {
   return new Date(timestamp).toLocaleString();
@@ -95,6 +96,11 @@ export function JobDetailPage() {
 
   async function handleReviewAction(payload: SubmitReviewRequest) {
     const nextDetail = await api.submitReview(jobId, payload);
+    setDetail(nextDetail);
+  }
+
+  async function handleToolDecisions(payload: DecideToolCallsRequest) {
+    const nextDetail = await api.decideToolCalls(jobId, payload);
     setDetail(nextDetail);
   }
 
@@ -260,6 +266,10 @@ export function JobDetailPage() {
 
       {detail.architectureMode ? (
         <DesignPanel jobId={detail.jobId} designUri={detail.artifactUris.twf_source} />
+      ) : null}
+
+      {detail.canDecideToolCalls ? (
+        <ToolApprovalPanel calls={detail.pendingToolCalls} onSubmit={handleToolDecisions} />
       ) : null}
 
       <ReviewActions detail={detail} onSubmit={handleReviewAction} />

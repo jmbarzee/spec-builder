@@ -26,7 +26,9 @@ GuiJobStatus = Literal[
     "cancelled",
 ]
 UploadedArtifactKind = Literal["pdf", "image", "markdown", "notes"]
-ReviewEntryKind = Literal["feedback", "approval", "rejection", "force_finalize", "cancel"]
+ReviewEntryKind = Literal[
+    "feedback", "approval", "rejection", "force_finalize", "cancel", "tool_decision"
+]
 StageName = Literal[
     "acquire",
     "extract",
@@ -80,6 +82,14 @@ class ReviewFeedbackEntry(ApiModel):
     text: str | None = None
 
 
+class PendingToolCall(ApiModel):
+    """An agent tool call held for a human decision."""
+
+    tool_call_id: str
+    tool_name: str
+    args: str  # JSON
+
+
 class StageState(ApiModel):
     """Normalized stage timeline state for the frontend."""
 
@@ -130,11 +140,13 @@ class JobDetail(ApiModel):
     current_draft_metadata: DraftMetadata | None = None
     traceability_summary: TraceabilitySummary | None = None
     pending_human_action: PendingHumanAction | None = None
+    pending_tool_calls: list[PendingToolCall] = Field(default_factory=list)
     final_workflow_status: FinalStatus | None = None
     artifact_uris: dict[str, str] = Field(default_factory=dict)
     can_approve: bool = False
     can_reject: bool = False
     can_provide_feedback: bool = False
+    can_decide_tool_calls: bool = False
     can_force_finalize: bool = False
     can_download: bool = False
     can_create_revision: bool = False
@@ -191,6 +203,12 @@ class SubmitReviewRequest(ApiModel):
 
     action: ReviewAction
     text: str | None = None
+
+
+class DecideToolCallsRequest(ApiModel):
+    """Request payload deciding every pending tool call at once."""
+
+    decisions: dict[str, bool]  # tool_call_id -> approved
 
 
 class CreateRevisionRequest(ApiModel):
@@ -253,6 +271,7 @@ class StoredJobRecord(ApiModel):
     current_draft_metadata: DraftMetadata | None = None
     traceability_summary: TraceabilitySummary | None = None
     pending_human_action: PendingHumanAction | None = None
+    pending_tool_calls: list[PendingToolCall] = Field(default_factory=list)
     final_workflow_status: FinalStatus | None = None
     artifact_uris: dict[str, str] = Field(default_factory=dict)
     stages: list[StageState] = Field(default_factory=list)

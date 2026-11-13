@@ -6,6 +6,9 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai.messages import ModelMessage  # noqa: TC002 -- pydantic resolves it at runtime
+
+from src.workflows.spec_builder.step_agent import HeldCall  # noqa: TC001 -- field type
 
 SPEC_BUILDER_TASK_QUEUE = "spec-builder-task-queue"
 
@@ -26,7 +29,7 @@ WorkflowPhase = Literal[
     "cancelled",
     "failed",
 ]
-PendingHumanAction = Literal["clarification", "approval"]
+PendingHumanAction = Literal["clarification", "approval", "tool_approval"]
 CriticRecommendedAction = Literal["proceed", "reextract", "ask_human"]
 PrimaryIntent = Literal[
     "implementation_spec",
@@ -308,6 +311,17 @@ class ClarificationRecord(StrictModel):
     note_uri: str | None = None
 
 
+class ToolHold(StrictModel):
+    """A stage's agent run paused on tool calls awaiting a human decision."""
+
+    agent: str
+    phase: WorkflowPhase  # restored when the stage resumes
+    message_history: list[ModelMessage]
+    calls: list[HeldCall]
+    deadline: datetime
+    decisions: dict[str, bool] = Field(default_factory=dict)  # tool_call_id -> approved
+
+
 class SpecBuilderState(StrictModel):
     """Durable workflow state."""
 
@@ -320,6 +334,7 @@ class SpecBuilderState(StrictModel):
     draft_restarts: int = 0
     restart_point: RestartPoint = "acquire"
     pending_human_action: PendingHumanAction | None = None
+    tool_hold: ToolHold | None = None
     acquisition: AcquisitionOutput | None = None
     extraction: StructuredExtractionOutput | None = None
     intent: IntentClassificationOutput | None = None
@@ -356,6 +371,7 @@ class SpecBuilderStatus(StrictModel):
     draft_restarts: int
     restart_point: RestartPoint
     pending_human_action: PendingHumanAction | None = None
+    pending_tool_calls: list[HeldCall] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     artifact_uris: dict[str, str] = Field(default_factory=dict)
@@ -401,6 +417,13 @@ class RejectDraftInput(StrictModel):
     request_id: str
     reason: str
     restart_point: Literal["draft", "extract", "acquire"] = "draft"
+
+
+class DecideToolCallsInput(StrictModel):
+    """Signal payload deciding every pending tool call of a hold at once."""
+
+    request_id: str
+    decisions: dict[str, bool]  # tool_call_id -> approved
 
 
 class CancelJobInput(StrictModel):

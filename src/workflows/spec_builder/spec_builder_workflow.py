@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
         CancelJobInput,
         ClarificationRecord,
         DraftMetadata,
+        DecideToolCallsInput,
         DraftSpecInput,
         ExtractionCriticInput,
         ForceFinalizeDraftInput,
@@ -37,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         SubmitClarificationInput,
         SupervisorDecisionInput,
         TemporalBestPracticesReviewInput,
+        ToolHold,
         TraceabilitySummary,
     )
     from src.workflows.spec_builder.spec_builder_activities import (
@@ -48,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
         run_structured_extraction,
         run_supervisor_decision,
     )
+    from src.workflows.spec_builder.step_agent import StepRequest, run_step
     from src.workflows.spec_builder.temporal_best_practices_review_workflow import (
         TemporalBestPracticesReviewWorkflow,
     )
@@ -143,6 +146,7 @@ class SpecBuilderWorkflow:
             draft_restarts=state.draft_restarts,
             restart_point=state.restart_point,
             pending_human_action=state.pending_human_action,
+            pending_tool_calls=state.tool_hold.calls if state.tool_hold else [],
             open_questions=state.open_questions,
             warnings=state.warnings,
             artifact_uris=state.artifact_uris,
@@ -380,6 +384,29 @@ class SpecBuilderWorkflow:
         self._rejection_payload = payload
 
     @workflow.signal
+    def decide_tool_calls(self, payload: DecideToolCallsInput) -> None:
+        """Decide every pending tool call of the current hold at once."""
+        if self.state is None:
+            workflow.logger.warning("Tool decisions received before state initialization.")
+            return
+        if self._seen_request(payload.request_id):
+            return
+        self._record_request(payload.request_id)
+        hold = self.state.tool_hold
+        # Pydantic AI resumes only a whole batch, so a partial or repeated decision is refused.
+        if (
+            hold is None
+            or hold.decisions
+            or set(payload.decisions) != {call.tool_call_id for call in hold.calls}
+        ):
+            self.state.warnings = self._merge_questions(
+                self.state.warnings,
+                ["Received decide_tool_calls that does not match the undecided pending calls."],
+            )
+            return
+        hold.decisions = payload.decisions
+
+    @workflow.signal
     def cancel_job(self, payload: CancelJobInput) -> None:
         """Cancel the current submission."""
         #TODO: Validate if this actually works, it's been buggy
@@ -450,15 +477,76 @@ class SpecBuilderWorkflow:
             return "rejected"
         return "timeout"
 
-    async def _advance_iteration(self, input: SpecBuilderInput) -> None:
-        state = self._ensure_state()
-        state.iteration += 1
-        state.iterations_in_current_run += 1
-        if not workflow.info().is_continue_as_new_suggested():
-            return
+    async def _run_agent_step(
+        self,
+        input: SpecBuilderInput,
+        agent: str,
+        prompt: str,
+    ) -> str | None:
+        """Run a step agent to its output, holding for a human decision at each held tool call.
 
+        Returns None when the hold timed out or the job was canceled (`state.canceled` tells which).
+        A stage that continued as new re-enters here and resumes the hold it carried.
+        """
+        state = self._ensure_state()
+        durable = input.options.durable_agents
+        result = None
+        if state.tool_hold is None:
+            result = await run_step(StepRequest(agent=agent, prompt=prompt), durable=durable)
+        while True:
+            if result is not None:
+                if not result.held:
+                    return result.output
+                state.tool_hold = ToolHold(
+                    agent=agent,
+                    phase=state.phase,
+                    message_history=result.message_history,
+                    calls=result.held,
+                    deadline=workflow.now() + HUMAN_RESPONSE_TIMEOUT,
+                )
+            hold = state.tool_hold
+            if hold is None or hold.agent != agent:
+                raise RuntimeError(f"Carried hold does not belong to agent {agent!r}.")
+            state.phase = "waiting_for_approval"
+            state.pending_human_action = "tool_approval"
+            # The deadline is absolute, so a hold that rolls over keeps its original 24 hours.
+            try:
+                await workflow.wait_condition(
+                    lambda hold=hold: bool(hold.decisions)
+                    or state.canceled
+                    or workflow.info().is_continue_as_new_suggested(),
+                    timeout=max(hold.deadline - workflow.now(), timedelta(0)),
+                    timeout_summary="waiting for tool-call approval",
+                )
+            except TimeoutError:
+                self._release_hold()
+                return None
+            if state.canceled:
+                self._release_hold()
+                return None
+            if workflow.info().is_continue_as_new_suggested():
+                await self._continue_as_new(input)
+            self._release_hold()
+            result = await run_step(
+                StepRequest(
+                    agent=agent,
+                    message_history=hold.message_history,
+                    approvals=hold.decisions,
+                ),
+                durable=durable,
+            )
+
+    def _release_hold(self) -> None:
+        state = self._ensure_state()
+        if state.tool_hold is not None:
+            state.phase = state.tool_hold.phase
+        state.tool_hold = None
+        state.pending_human_action = None
+
+    async def _continue_as_new(self, input: SpecBuilderInput) -> None:
         # Continue-as-new trims workflow history, but only after outstanding signal/query handlers
         # have drained so we do not drop an in-flight human decision during rollover.
+        state = self._ensure_state()
         await workflow.wait_condition(workflow.all_handlers_finished)
         resumed_state = state.model_copy(
             deep=True,
@@ -470,6 +558,13 @@ class SpecBuilderWorkflow:
         workflow.continue_as_new(
             input.model_copy(deep=True, update={"resume_state": resumed_state})
         )
+
+    async def _advance_iteration(self, input: SpecBuilderInput) -> None:
+        state = self._ensure_state()
+        state.iteration += 1
+        state.iterations_in_current_run += 1
+        if workflow.info().is_continue_as_new_suggested():
+            await self._continue_as_new(input)
 
     async def _complete(self, input: SpecBuilderInput) -> SpecBuilderResult:
         state = self._ensure_state()
@@ -531,11 +626,7 @@ class SpecBuilderWorkflow:
             state.phase = "completed"
         return result
 
-    @workflow.run
-    async def run(self, input: SpecBuilderInput) -> SpecBuilderResult:
-        """Run the fixed spec-builder pipeline with bounded iteration."""
-        # A continued execution resumes from the last durable checkpoint; a fresh execution starts
-        # from an empty state rooted at the provided job ID.
+    def _load_state(self, input: SpecBuilderInput) -> None:
         self.state = (
             input.resume_state.model_copy(deep=True)
             if input.resume_state
@@ -544,6 +635,13 @@ class SpecBuilderWorkflow:
         self._processed_request_ids = set(self.state.processed_request_ids)
         if self.state.job_id != input.job_id:
             self.state.job_id = input.job_id
+
+    @workflow.run
+    async def run(self, input: SpecBuilderInput) -> SpecBuilderResult:
+        """Run the fixed spec-builder pipeline with bounded iteration."""
+        # A continued execution resumes from the last durable checkpoint; a fresh execution starts
+        # from an empty state rooted at the provided job ID.
+        self._load_state(input)
 
         try:
             while self.state.iteration < input.options.max_iterations:
