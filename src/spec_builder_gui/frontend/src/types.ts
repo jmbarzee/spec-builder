@@ -14,6 +14,7 @@ export type WorkflowPhase =
   | "draft"
   | "best_practices_review"
   | "supervisor"
+  | "design"
   | "waiting_for_human"
   | "waiting_for_approval"
   | "completed"
@@ -56,7 +57,8 @@ export type StageState = {
     | "critic"
     | "draft"
     | "best_practices_review"
-    | "supervisor";
+    | "supervisor"
+    | "design";
   status: "not_started" | "running" | "completed" | "failed" | "skipped";
   startedAt?: string | null;
   completedAt?: string | null;

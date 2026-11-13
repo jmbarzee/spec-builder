@@ -43,6 +43,7 @@ from src.spec_builder_gui.api_models import (
     UploadArtifactResponse,
 )
 from src.spec_builder_gui.job_store import GuiJobStore, path_to_uri, uri_to_path
+from src.workflows.spec_builder.architecture import architecture_mode_opted_in
 from src.workflows.spec_builder.custom_types import (
     ApproveDraftInput,
     ArtifactInput,
@@ -75,6 +76,7 @@ STAGE_ORDER: tuple[StageName, ...] = (
     "draft",
     "best_practices_review",
     "supervisor",
+    "design",
 )
 STAGE_INDEX = {stage: index for index, stage in enumerate(STAGE_ORDER)}
 PHASE_TO_STAGE: dict[str, StageName] = {
@@ -85,6 +87,7 @@ PHASE_TO_STAGE: dict[str, StageName] = {
     "draft": "draft",
     "best_practices_review": "best_practices_review",
     "supervisor": "supervisor",
+    "design": "design",
 }
 STAGE_ARTIFACT_KEYS: dict[StageName, str] = {
     "acquire": "source_bundle",
@@ -94,6 +97,7 @@ STAGE_ARTIFACT_KEYS: dict[StageName, str] = {
     "draft": "draft_markdown",
     "best_practices_review": "best_practices_review",
     "supervisor": "supervisor_decision",
+    "design": "twf_source",
 }
 ALLOWED_UPLOADS = {
     ".pdf": ("pdf", "document", {"application/pdf"}),
@@ -102,7 +106,6 @@ ALLOWED_UPLOADS = {
     ".jpeg": ("image", "image", {"image/jpeg"}),
     ".webp": ("image", "image", {"image/webp"}),
 }
-ARCHITECTURE_MODE_ENV = "SPEC_BUILDER_ARCHITECTURE_MODE"
 DURABLE_AGENTS_ENV = "SPEC_BUILDER_DURABLE_AGENTS"
 TWF_ARTIFACT_KEYS = ("twf_source", "twf_parse_json", "twf_graph_json")
 ACTIVE_JOB_STATUSES = {"queued", "running", "waiting_for_human"}
@@ -111,8 +114,7 @@ CLOSED_JOB_STATUSES = {"completed", "failed", "cancelled"}
 
 def architecture_mode_enabled() -> bool:
     """Return whether the deployment opted in to architecture mode and `twf` is installed."""
-    opted_in = os.environ.get(ARCHITECTURE_MODE_ENV, "").lower() in {"1", "true", "yes"}
-    return opted_in and shutil.which("twf") is not None
+    return architecture_mode_opted_in() and shutil.which("twf") is not None
 
 
 def durable_agents_enabled() -> bool:
@@ -131,9 +133,17 @@ def slugify(value: str) -> str:
     return normalized or "spec-builder"
 
 
-def default_stage_states() -> list[StageState]:
+def stages_for(*, architecture_mode: bool) -> list[StageName]:
+    """Return a job's stages in order; only architecture-mode jobs have the design stage."""
+    return [stage for stage in STAGE_ORDER if architecture_mode or stage != "design"]
+
+
+def default_stage_states(*, architecture_mode: bool) -> list[StageState]:
     """Return the default stage timeline for a new job."""
-    return [StageState(stage=stage, status="not_started") for stage in STAGE_ORDER]
+    return [
+        StageState(stage=stage, status="not_started")
+        for stage in stages_for(architecture_mode=architecture_mode)
+    ]
 
 
 class GuiServiceError(RuntimeError):
@@ -374,11 +384,11 @@ class SpecBuilderGuiService:
         running_stage = PHASE_TO_STAGE.get(record.current_phase)
         failed_stage = running_stage if record.status in {"failed", "cancelled"} else None
         next_states: list[StageState] = []
-        for index, stage in enumerate(STAGE_ORDER):
+        for stage in stages_for(architecture_mode=record.architecture_mode):
             previous = existing.get(stage, StageState(stage=stage, status="not_started"))
             artifact_present = STAGE_ARTIFACT_KEYS[stage] in record.artifact_uris
             if running_stage is not None and record.status in {"running", "queued"}:
-                if index < STAGE_INDEX[running_stage]:
+                if STAGE_INDEX[stage] < STAGE_INDEX[running_stage]:
                     desired_status = "completed"
                 elif stage == running_stage:
                     desired_status = "running"
@@ -609,7 +619,7 @@ class SpecBuilderGuiService:
             require_human_approval=request.require_human_approval,
             architecture_mode=request.architecture_mode,
             output_targets=request.output_targets,
-            stages=default_stage_states(),
+            stages=default_stage_states(architecture_mode=request.architecture_mode),
         )
         self.job_store.save_job(record)
         return CreateJobResponse(

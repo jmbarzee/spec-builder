@@ -26,6 +26,7 @@ class TestSpecBuilderWorker:
 
         assert "SpecBuilderWorkflow" in workflow_names
         assert "TemporalBestPracticesReviewWorkflow" in workflow_names
-        assert len(workflow_names) == 2
+        assert "DesignStageWorkflow" in workflow_names
+        assert len(workflow_names) == 3
         assert "persist_final_outputs" in activity_names
         assert callable(build_worker)

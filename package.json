@@ -1,0 +1,8 @@
+{
+  "name": "spec-builder",
+  "private": true,
+  "description": "temporal-architect skills the design agent reads; the version matches twf-cli",
+  "dependencies": {
+    "@temporal-architect/claude-plugin": "0.17.0"
+  }
+}

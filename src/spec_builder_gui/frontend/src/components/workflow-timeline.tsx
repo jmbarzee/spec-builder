@@ -8,6 +8,7 @@ const STAGE_LABELS: Record<StageState["stage"], string> = {
   draft: "Draft Spec",
   best_practices_review: "Best-Practices Review",
   supervisor: "Supervisor Decision",
+  design: "System Design",
 };
 
 export function WorkflowTimeline({ stages }: { stages: StageState[] }) {

@@ -45,6 +45,7 @@ SPEC_BUILDER_MODEL_MAX_ATTEMPTS=3
    git clone https://github.com/kawofong/temporal-python-template.git
    cd temporal-python-template
    uv sync --dev
+   npm ci   # only for architecture mode; see below
    ```
 
 1. **Install development hooks**
@@ -212,7 +213,7 @@ Required for the defaults:
 
 Optional overrides:
 
-- `SPEC_BUILDER_<STAGE>_MODEL`, for `ACQUIRE_CONTENT`, `STRUCTURED_EXTRACTION`, `INTENT_CLASSIFICATION`, `EXTRACTION_CRITIC`, `DRAFT_SPEC`, `BEST_PRACTICES_REVIEW` and `SUPERVISOR_DECISION` (default `google:gemini-3.1-pro-preview`), for example `anthropic:claude-sonnet-4-5` with that provider's API key
+- `SPEC_BUILDER_<STAGE>_MODEL`, for `ACQUIRE_CONTENT`, `STRUCTURED_EXTRACTION`, `INTENT_CLASSIFICATION`, `EXTRACTION_CRITIC`, `DRAFT_SPEC`, `BEST_PRACTICES_REVIEW`, `SUPERVISOR_DECISION` and `DESIGN` (default `google:gemini-3.1-pro-preview`), for example `anthropic:claude-sonnet-4-5` with that provider's API key
 - `SPEC_BUILDER_EMBEDDING_MODEL` (default `google:gemini-embedding-001`; only `google` is supported)
 - `SPEC_BUILDER_MODEL_REQUEST_TIMEOUT_SECONDS` (default `60`)
 - `SPEC_BUILDER_MODEL_MAX_ATTEMPTS` (default `3`)
@@ -228,6 +229,12 @@ Stages run agents on [Pydantic AI](https://pydantic.dev/docs/ai/) through [`step
 The GUI reads the variable when it starts a job and records it in the job's `durable_agents` option, so changing it never alters a job already running.
 
 An MCP tool marked `approval_required` holds its stage: the job detail page lists the pending calls, and one decision for every call resumes the stage. An unanswered hold ends the job as `needs_clarification` 24 hours after it began, even across continue-as-new.
+
+### Architecture Mode
+
+With `SPEC_BUILDER_ARCHITECTURE_MODE=true` (and `twf` on `PATH`), a job can ask for a Temporal design. After the spec is accepted, a design agent writes `.twf` following [temporal-architect](https://www.npmjs.com/package/@temporal-architect/claude-plugin)'s design skill, checks it with the `twf` MCP tools, and is sent the parser's errors to repair it until `twf parse` reports none or `max_twf_revisions` (default `2`) repairs are spent. A design still invalid then adds a job warning; the markdown spec completes either way. Its model is `SPEC_BUILDER_DESIGN_MODEL`.
+
+Setup, besides `uv sync --dev --extra architecture`: `npm ci` at the repository root, which installs the skills. The worker checks at startup, when architecture mode is on, that `twf --version` equals the skills' `MANIFEST.json` version and that every skill file matches its hash. Move `twf-cli` in `pyproject.toml` and `@temporal-architect/claude-plugin` in `package.json` together.
 
 ### Package Layout
 

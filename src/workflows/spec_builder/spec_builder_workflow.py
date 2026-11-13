@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from temporalio import workflow
+from temporalio.exceptions import ChildWorkflowError
 from temporalio.workflow import ParentClosePolicy
 
 HUMAN_RESPONSE_TIMEOUT = timedelta(hours=24)
@@ -19,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
         ApproveDraftInput,
         CancelJobInput,
         ClarificationRecord,
+        DesignStageInput,
         DraftMetadata,
         DecideToolCallsInput,
         DraftSpecInput,
@@ -41,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
         ToolHold,
         TraceabilitySummary,
     )
+    from src.workflows.spec_builder.design_stage_workflow import DesignStageWorkflow
     from src.workflows.spec_builder.spec_builder_activities import (
         acquire_content,
         persist_final_outputs,
@@ -566,10 +569,49 @@ class SpecBuilderWorkflow:
         if workflow.info().is_continue_as_new_suggested():
             await self._continue_as_new(input)
 
+    async def _run_design_stage(self, input: SpecBuilderInput, markdown_spec: str) -> None:
+        """Design the accepted spec as `.twf`; a failed or invalid design warns, never fails."""
+        state = self._ensure_state()
+        state.phase = "design"
+        try:
+            design = await workflow.execute_child_workflow(
+                DesignStageWorkflow.run,
+                DesignStageInput(
+                    job_id=input.job_id,
+                    markdown_spec=markdown_spec,
+                    max_twf_revisions=input.options.max_twf_revisions,
+                    durable_agents=input.options.durable_agents,
+                ),
+                id=f"{workflow.info().workflow_id}-design-{workflow.uuid4()}",
+                task_queue=SPEC_BUILDER_TASK_QUEUE,
+                parent_close_policy=ParentClosePolicy.TERMINATE,
+            )
+        except ChildWorkflowError as error:
+            # Architecture mode is an add-on, so a design outage must not lose the spec.
+            cause = error
+            while cause.cause is not None:
+                cause = cause.cause
+            state.warnings = self._merge_questions(
+                state.warnings, [f"Design stage failed: {cause}"]
+            )
+            return
+        state.design = design
+        state.artifact_uris.update(design.artifact_uris)
+        if not design.valid:
+            errors = sum(finding.severity == "error" for finding in design.diagnostics)
+            attempts = 1 + input.options.max_twf_revisions
+            state.warnings = self._merge_questions(
+                state.warnings,
+                [f"Design still has {errors} parser errors after {attempts} attempts."],
+            )
+
     async def _complete(self, input: SpecBuilderInput) -> SpecBuilderResult:
         state = self._ensure_state()
         if state.draft is None:
             raise RuntimeError("Cannot complete workflow without a draft.")
+        if input.architecture_mode:
+            # Here, not after each draft, so only the accepted spec is designed.
+            await self._run_design_stage(input, state.draft.markdown_spec)
         persisted = await workflow.execute_activity(
             persist_final_outputs,
             PersistFinalOutputsInput(
