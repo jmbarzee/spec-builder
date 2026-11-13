@@ -14,7 +14,7 @@ A modern, production-ready template for building Temporal applications using the
 - Pre-configured development tooling with Ruff, Poe, and pre-commit
 - Documentation for Temporal patterns and testing
 - [AGENTS.md](https://agents.md/) guidance for coding agents working in the repo
-- A `src/workflows/spec_builder/` workflow package with typed models, child workflows, Gemini-backed activities, and tests
+- A `src/workflows/spec_builder/` workflow package with typed models, child workflows, model-backed activities, and tests
 - A `src/spec_builder_gui/` local web app backend and React frontend for job submission, review, and revision flows
 
 ## Getting Started
@@ -23,18 +23,18 @@ A modern, production-ready template for building Temporal applications using the
 
 - [uv](https://docs.astral.sh/uv/)
 - [Temporal CLI](https://docs.temporal.io/cli#install)
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` for real Gemini-backed activity execution
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY` for the default Gemini models, or the key of whichever provider a stage's model names
 
 ### Local Environment
 
-`GeminiExecutor` now loads the nearest project `.env` automatically via `python-dotenv`, without overriding variables that are already exported in the shell.
+`ModelExecutor` loads the nearest project `.env` automatically via `python-dotenv`, without overriding variables that are already exported in the shell.
 
 Example:
 
 ```bash
 GEMINI_API_KEY=your-key-here
-SPEC_BUILDER_GEMINI_REQUEST_TIMEOUT_SECONDS=60
-SPEC_BUILDER_GEMINI_MAX_ATTEMPTS=3
+SPEC_BUILDER_MODEL_REQUEST_TIMEOUT_SECONDS=60
+SPEC_BUILDER_MODEL_MAX_ATTEMPTS=3
 ```
 
 ### Quick Start
@@ -202,26 +202,22 @@ The final persistence step writes real local files into the requested `output_di
 - `best_practices_review.json`
 - `issues.json`
 
-### Gemini Configuration
+### Model Configuration
 
-Runtime configuration is handled by [`src/workflows/spec_builder/gemini_executor.py`](./src/workflows/spec_builder/gemini_executor.py).
+Runtime configuration is handled by [`src/workflows/spec_builder/model_executor.py`](./src/workflows/spec_builder/model_executor.py). Every model-backed stage reads its model from one `provider:model` setting; the default for each is Gemini.
 
-Required environment variables:
+Required for the defaults:
 
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY`
 
 Optional overrides:
 
-- `SPEC_BUILDER_GEMINI_REQUEST_TIMEOUT_SECONDS`
-- `SPEC_BUILDER_GEMINI_MAX_ATTEMPTS`
-- `SPEC_BUILDER_GEMINI_EMBEDDING_MODEL`
-- `SPEC_BUILDER_GEMINI_ACQUIRE_CONTENT_MODEL`
-- `SPEC_BUILDER_GEMINI_STRUCTURED_EXTRACTION_MODEL`
-- `SPEC_BUILDER_GEMINI_INTENT_CLASSIFICATION_MODEL`
-- `SPEC_BUILDER_GEMINI_EXTRACTION_CRITIC_MODEL`
-- `SPEC_BUILDER_GEMINI_DRAFT_SPEC_MODEL`
-- `SPEC_BUILDER_GEMINI_BEST_PRACTICES_REVIEW_MODEL`
-- `SPEC_BUILDER_GEMINI_SUPERVISOR_DECISION_MODEL`
+- `SPEC_BUILDER_<STAGE>_MODEL`, for `ACQUIRE_CONTENT`, `STRUCTURED_EXTRACTION`, `INTENT_CLASSIFICATION`, `EXTRACTION_CRITIC`, `DRAFT_SPEC`, `BEST_PRACTICES_REVIEW` and `SUPERVISOR_DECISION` (default `google-gla:gemini-3.1-pro-preview`), for example `anthropic:claude-sonnet-4-5` with that provider's API key
+- `SPEC_BUILDER_EMBEDDING_MODEL` (default `google-gla:gemini-embedding-001`; only `google-gla` is supported)
+- `SPEC_BUILDER_MODEL_REQUEST_TIMEOUT_SECONDS` (default `60`)
+- `SPEC_BUILDER_MODEL_MAX_ATTEMPTS` (default `3`)
+
+A value without `provider:` fails naming its setting. The retired `SPEC_BUILDER_GEMINI_*` variables fail at startup naming the setting that replaces each.
 
 ### Agent Runtime
 
@@ -235,9 +231,9 @@ The GUI reads the variable when it starts a job and records it in the job's `dur
 
 - [`src/workflows/spec_builder/custom_types.py`](./src/workflows/spec_builder/custom_types.py): typed Pydantic contracts for workflow state, signals, queries, and stage outputs
 - [`src/workflows/spec_builder/spec_builder_workflow.py`](./src/workflows/spec_builder/spec_builder_workflow.py): parent workflow orchestration, queries, signals, approval gates, restart rules, and sample local execution
-- [`src/workflows/spec_builder/spec_builder_activities.py`](./src/workflows/spec_builder/spec_builder_activities.py): activity boundaries for acquisition, Gemini-backed stages, retrieval, and final artifact persistence
+- [`src/workflows/spec_builder/spec_builder_activities.py`](./src/workflows/spec_builder/spec_builder_activities.py): activity boundaries for acquisition, model-backed stages, retrieval, and final artifact persistence
 - [`src/workflows/spec_builder/prompts/activity_prompts.py`](./src/workflows/spec_builder/prompts/activity_prompts.py): prompt builders for each model-backed stage
-- [`src/workflows/spec_builder/gemini_executor.py`](./src/workflows/spec_builder/gemini_executor.py): Gemini adapter with retries, typed parsing, model overrides, and attachments
+- [`src/workflows/spec_builder/model_executor.py`](./src/workflows/spec_builder/model_executor.py): model adapter with per-stage `provider:model` settings, retries, typed parsing, and attachments
 - [`src/workflows/spec_builder/worker.py`](./src/workflows/spec_builder/worker.py): worker bootstrap for the `spec-builder-task-queue`
 - [`src/workflows/spec_builder/tests/`](./src/workflows/spec_builder/tests/): workflow, activity, worker, and executor tests
 - [`src/spec_builder_gui/server.py`](./src/spec_builder_gui/server.py): local `aiohttp` backend that stores GUI metadata and proxies Temporal operations

@@ -46,7 +46,7 @@ from src.workflows.spec_builder.custom_types import (
     ValidateTwfInput,
     ValidateTwfOutput,
 )
-from src.workflows.spec_builder.gemini_executor import GeminiAttachment, GeminiExecutor
+from src.workflows.spec_builder.model_executor import Attachment, ModelExecutor
 from src.workflows.spec_builder.prompts.activity_prompts import (
     build_acquisition_prompt,
     build_acquisition_system_instruction,
@@ -180,15 +180,15 @@ def _merge_acquired_artifacts(
     artifact: ArtifactInput,
     source_uri: str,
     local_result: AcquiredArtifact | None,
-    gemini_result: AcquiredArtifact | None,
+    model_result: AcquiredArtifact | None,
 ) -> AcquiredArtifact:
-    # Local text extraction is fast and lossless for readable files. Gemini adds OCR / multimodal
+    # Local text extraction is fast and lossless for readable files. The model adds OCR / multimodal
     # coverage for PDFs and images. We preserve both when available instead of choosing one winner.
     extracted_text_parts = [
         value
         for value in [
             local_result.extracted_text if local_result else None,
-            gemini_result.extracted_text if gemini_result else None,
+            model_result.extracted_text if model_result else None,
         ]
         if value
     ]
@@ -196,13 +196,13 @@ def _merge_acquired_artifacts(
     warnings = _dedupe_strings(
         [
             *(local_result.warnings if local_result else []),
-            *(gemini_result.warnings if gemini_result else []),
+            *(model_result.warnings if model_result else []),
         ]
     )
-    visual_elements = gemini_result.visual_elements if gemini_result else []
+    visual_elements = model_result.visual_elements if model_result else []
     confidence = max(
         local_result.confidence if local_result else 0.0,
-        gemini_result.confidence if gemini_result else 0.0,
+        model_result.confidence if model_result else 0.0,
     )
     return AcquiredArtifact(
         artifact_id=artifact.artifact_id,
@@ -214,10 +214,10 @@ def _merge_acquired_artifacts(
         source_uri=source_uri,
     )
 
-def _load_executor() -> GeminiExecutor:
-    return GeminiExecutor()
+def _load_executor() -> ModelExecutor:
+    return ModelExecutor()
 
-def _extract_with_gemini(
+async def _extract_with_model(
     *,
     artifact: ArtifactInput,
     raw_path: Path,
@@ -225,7 +225,7 @@ def _extract_with_gemini(
 ) -> AcquiredArtifact:
     executor = _load_executor()
     mime_type = _detect_mime_type(artifact, raw_path)
-    acquired = executor.generate_structured(
+    acquired = await executor.generate_structured(
         stage_name="acquire_content",
         # Clarifications are threaded into acquisition so the model can reinterpret the same
         # source material with the user's added context instead of treating clarifications as a
@@ -234,11 +234,7 @@ def _extract_with_gemini(
         response_model=AcquiredArtifact,
         system_instruction=build_acquisition_system_instruction(),
         attachments=[
-            GeminiAttachment(
-                data=raw_path.read_bytes(),
-                mime_type=mime_type,
-                filename=raw_path.name,
-            )
+            Attachment(data=raw_path.read_bytes(), mime_type=mime_type)
         ],
         temperature=0.0,
     )
@@ -388,22 +384,22 @@ async def acquire_content(input: AcquireContentInput) -> AcquisitionOutput:
         source_uri = _uri_for_path(raw_path)
 
         local_result: AcquiredArtifact | None = None
-        gemini_result: AcquiredArtifact | None = None
+        model_result: AcquiredArtifact | None = None
         local_text = _read_text_if_available(raw_path)
         if local_text:
             local_result = _build_acquired_artifact_from_text(artifact, source_uri, local_text)
 
         mime_type = _detect_mime_type(artifact, raw_path)
         if _is_visual_or_binary(artifact, mime_type):
-            # Visual artifacts can still produce textual evidence through Gemini, so we merge that
+            # Visual artifacts can still produce textual evidence through the model, so we merge that
             # output with any locally-readable text instead of treating the strategies as exclusive.
-            gemini_result = _extract_with_gemini(
+            model_result = await _extract_with_model(
                 artifact=artifact,
                 raw_path=raw_path,
                 clarifications=clarification_records,
             )
 
-        if local_result is None and gemini_result is None:
+        if local_result is None and model_result is None:
             warnings.append(
                 f"Artifact '{artifact.artifact_id}' could not be normalized as text or multimodal input."
             )
@@ -415,7 +411,7 @@ async def acquire_content(input: AcquireContentInput) -> AcquisitionOutput:
                 source_uri=source_uri,
             )
         else:
-            acquired = _merge_acquired_artifacts(artifact, source_uri, local_result, gemini_result)
+            acquired = _merge_acquired_artifacts(artifact, source_uri, local_result, model_result)
         acquired_artifacts.append(_persist_normalized_text(input.job_id, acquired))
 
     for clarification in clarification_records:
@@ -435,7 +431,7 @@ async def run_structured_extraction(input: StructuredExtractionInput) -> Structu
     """Generate the structured intermediate representation."""
     activity.logger.info("Run structured extraction for job %s", input.job_id)
     executor = _load_executor()
-    extraction = executor.generate_structured(
+    extraction = await executor.generate_structured(
         stage_name="structured_extraction",
         # Prior extraction output and revision notes are fed back in to support targeted rewrites
         # instead of forcing the model to rediscover the entire intermediate representation.
@@ -460,7 +456,7 @@ async def run_intent_classification(
     """Classify the target output intent for the submission."""
     activity.logger.info("Run intent classification for job %s", input.job_id)
     executor = _load_executor()
-    intent = executor.generate_structured(
+    intent = await executor.generate_structured(
         stage_name="intent_classification",
         prompt=build_intent_classification_prompt(input.extraction, input.user_intent),
         response_model=IntentClassificationOutput,
@@ -476,7 +472,7 @@ async def run_extraction_critic(input: ExtractionCriticInput) -> CriticOutput:
     """Assess whether the current extraction is strong enough to draft from."""
     activity.logger.info("Run extraction critic for job %s", input.job_id)
     executor = _load_executor()
-    critic = executor.generate_structured(
+    critic = await executor.generate_structured(
         stage_name="extraction_critic",
         prompt=build_extraction_critic_prompt(input.extraction, input.intent),
         response_model=CriticOutput,
@@ -492,7 +488,7 @@ async def run_draft_spec(input: DraftSpecInput) -> DraftSpecOutput:
     """Draft the markdown spec and structured JSON companion."""
     activity.logger.info("Run draft generation for job %s", input.job_id)
     executor = _load_executor()
-    draft = executor.generate_structured(
+    draft = await executor.generate_structured(
         stage_name="draft_spec",
         prompt=build_draft_spec_prompt(
             input.extraction,
@@ -605,7 +601,7 @@ async def run_best_practices_review(
     """Review the draft against retrieved Temporal best-practices passages."""
     activity.logger.info("Run best-practices review for job %s", input.job_id)
     executor = _load_executor()
-    assessment = executor.generate_structured(
+    assessment = await executor.generate_structured(
         stage_name="best_practices_review",
         # Retrieval and reasoning are separated: passage selection happens in one activity, then the
         # model judges the draft only against the most relevant supporting passages.
@@ -628,7 +624,7 @@ async def run_supervisor_decision(input: SupervisorDecisionInput) -> SupervisorD
     """Choose the bounded next action for the pipeline."""
     activity.logger.info("Run supervisor decision for job %s", input.job_id)
     executor = _load_executor()
-    decision = executor.generate_structured(
+    decision = await executor.generate_structured(
         stage_name="supervisor_decision",
         prompt=build_supervisor_decision_prompt(
             input.extraction_critic,

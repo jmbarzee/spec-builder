@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from temporalio.testing import ActivityEnvironment
 
 from src.workflows.spec_builder.custom_types import (
@@ -35,6 +37,7 @@ from src.workflows.spec_builder.custom_types import (
     TemporalBestPracticesReviewInput,
     TraceabilityEntry,
 )
+from src.workflows.spec_builder import model_executor
 from src.workflows.spec_builder.spec_builder_activities import (
     acquire_content,
     persist_final_outputs,
@@ -49,9 +52,9 @@ from src.workflows.spec_builder.spec_builder_activities import (
 
 
 class FakeExecutor:
-    """Fake Gemini executor for activity tests."""
+    """Fake model executor for activity tests."""
 
-    def generate_structured(self, **kwargs: object) -> AcquiredArtifact:
+    async def generate_structured(self, **kwargs: object) -> AcquiredArtifact:
         """Return a deterministic multimodal acquisition result."""
         prompt = str(kwargs["prompt"])
         if "Normalize the attached artifact" in prompt:
@@ -79,9 +82,9 @@ class FakeExecutor:
 
 
 class StageExecutor:
-    """Fake Gemini executor for stage-specific activity tests."""
+    """Fake model executor for stage-specific activity tests."""
 
-    def generate_structured(self, **kwargs: object):
+    async def generate_structured(self, **kwargs: object):
         """Return a deterministic model instance for each stage."""
         stage_name = kwargs["stage_name"]
         response_model = kwargs["response_model"]
@@ -362,7 +365,7 @@ class TestSpecBuilderActivities:
     ) -> None:
         """
         Scenario: Core model-backed stage execution
-        Given a deterministic executor stands in for Gemini
+        Given a deterministic executor stands in for the model
         When extraction, intent classification, critic, and draft activities run
         Then each activity should return the expected typed output and persistence URI
         """
@@ -440,7 +443,7 @@ class TestSpecBuilderActivities:
             def __init__(self) -> None:
                 self.prompt = ""
 
-            def generate_structured(self, **kwargs: object) -> DraftSpecOutput:
+            async def generate_structured(self, **kwargs: object) -> DraftSpecOutput:
                 self.prompt = str(kwargs["prompt"])
                 return build_draft()
 
@@ -493,13 +496,68 @@ class TestSpecBuilderActivities:
         assert draft.draft_version == 5
 
     @pytest.mark.asyncio
+    async def test_stage_should_run_on_the_provider_its_setting_names_when_others_keep_the_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Scenario: One stage on a second provider
+        Given only the intent-classification setting names an Anthropic model
+        When the intent and critic activities run against a stubbed model
+        Then intent should request the Anthropic spec, the critic its Gemini default,
+        and the parsed output should reach the activity result
+        """
+        requested: list[str] = []
+
+        def respond(_: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            properties = info.output_tools[0].parameters_json_schema["properties"]
+            if "primary_intent" in properties:
+                payload = IntentClassificationOutput(
+                    primary_intent="implementation_spec",
+                    target_audience="codex",
+                    expected_output_formats=["markdown"],
+                    best_practices_profile="temporal_workflow",
+                    confidence=0.9,
+                )
+            else:
+                payload = CriticOutput(
+                    score=0.9,
+                    blocking_issues=[],
+                    non_blocking_issues=[],
+                    missing_information=[],
+                    recommended_action="proceed",
+                )
+            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, payload.model_dump())])
+
+        def build(spec: str) -> FunctionModel:
+            requested.append(spec)
+            return FunctionModel(respond)
+
+        monkeypatch.setenv("SPEC_BUILDER_INTENT_CLASSIFICATION_MODEL", "anthropic:claude-sonnet-4-5")
+        monkeypatch.setattr(model_executor, "_build_model", build)
+        activity_environment = ActivityEnvironment()
+        extraction = build_structured_extraction()
+
+        intent = await activity_environment.run(
+            run_intent_classification,
+            IntentClassificationInput(job_id="job-provider", extraction=extraction, user_intent="Spec it."),
+        )
+        await activity_environment.run(
+            run_extraction_critic,
+            ExtractionCriticInput(job_id="job-provider", extraction=extraction, intent=intent),
+        )
+
+        assert requested == ["anthropic:claude-sonnet-4-5", "google-gla:gemini-3.1-pro-preview"]
+        assert intent.primary_intent == "implementation_spec"
+
+    @pytest.mark.asyncio
     async def test_review_and_supervisor_activities_should_return_structured_decisions_when_executor_succeeds(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
         Scenario: Review and supervisor evaluation
-        Given a deterministic executor stands in for Gemini
+        Given a deterministic executor stands in for the model
         When best-practices review and supervisor decision activities run
         Then they should return typed outputs with persisted URIs
         """
