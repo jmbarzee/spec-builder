@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from temporalio.api.enums.v1 import WorkflowExecutionStatus
 from temporalio.client import Client
-from temporalio.contrib.pydantic import pydantic_data_converter
 
 from src.spec_builder_gui.api_models import (
     CreateJobRequest,
@@ -100,6 +100,7 @@ ALLOWED_UPLOADS = {
     ".webp": ("image", "image", {"image/webp"}),
 }
 ARCHITECTURE_MODE_ENV = "SPEC_BUILDER_ARCHITECTURE_MODE"
+DURABLE_AGENTS_ENV = "SPEC_BUILDER_DURABLE_AGENTS"
 TWF_ARTIFACT_KEYS = ("twf_source", "twf_parse_json", "twf_graph_json")
 ACTIVE_JOB_STATUSES = {"queued", "running", "waiting_for_human"}
 CLOSED_JOB_STATUSES = {"completed", "failed", "cancelled"}
@@ -109,6 +110,11 @@ def architecture_mode_enabled() -> bool:
     """Return whether the deployment opted in to architecture mode and `twf` is installed."""
     opted_in = os.environ.get(ARCHITECTURE_MODE_ENV, "").lower() in {"1", "true", "yes"}
     return opted_in and shutil.which("twf") is not None
+
+
+def durable_agents_enabled() -> bool:
+    """Return whether new jobs run their agents durably; on unless the variable says otherwise."""
+    return os.environ.get(DURABLE_AGENTS_ENV, "true").lower() not in {"0", "false", "no"}
 
 
 def utc_now() -> datetime:
@@ -193,7 +199,7 @@ class TemporalSpecBuilderGateway:
     @classmethod
     async def connect(cls, target_host: str = "localhost:7233") -> TemporalSpecBuilderGateway:
         """Connect to Temporal and build a gateway instance."""
-        client = await Client.connect(target_host, data_converter=pydantic_data_converter)
+        client = await Client.connect(target_host, plugins=[PydanticAIPlugin()])
         return cls(client)
 
     async def start_workflow(
@@ -561,7 +567,10 @@ class SpecBuilderGuiService:
             user_intent=request.user_intent,
             output_targets=request.output_targets,
             output_directory=output_directory,
-            options=SpecBuilderOptions(require_human_approval=request.require_human_approval),
+            options=SpecBuilderOptions(
+                require_human_approval=request.require_human_approval,
+                durable_agents=durable_agents_enabled(),
+            ),
             architecture_mode=request.architecture_mode,
         )
         started = await self.temporal_gateway.start_workflow(

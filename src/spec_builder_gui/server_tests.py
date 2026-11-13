@@ -681,6 +681,40 @@ async def test_post_jobs_should_record_architecture_mode_in_workflow_input_when_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [(None, True), ("true", True), ("false", False), ("0", False)],
+)
+async def test_post_jobs_should_record_durable_agents_in_workflow_input_from_the_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str | None,
+    *,
+    expected: bool,
+) -> None:
+    """A job keeps the agent durability the environment named when it started."""
+    if env_value is None:
+        monkeypatch.delenv("SPEC_BUILDER_DURABLE_AGENTS", raising=False)
+    else:
+        monkeypatch.setenv("SPEC_BUILDER_DURABLE_AGENTS", env_value)
+    output_directory = tmp_path / "output"
+    output_directory.mkdir()
+    async with app_client(tmp_path) as (client, _service, gateway):
+        artifact = await upload_test_artifact(client)
+        response = await client.post(
+            "/api/jobs",
+            json=CreateJobRequest(
+                project_name="Spotify Sync",
+                output_directory=str(output_directory),
+                artifact_ids=[str(artifact["artifactId"])],
+            ).model_dump(by_alias=True),
+        )
+
+        assert response.status == 201
+        assert gateway.started_inputs[0][2].options.durable_agents is expected
+
+
+@pytest.mark.asyncio
 async def test_post_jobs_should_reject_architecture_mode_when_not_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

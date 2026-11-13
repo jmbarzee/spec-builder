@@ -94,6 +94,7 @@ class SpecBuilderOptions(StrictModel):
     max_draft_restarts: int = Field(default=2, ge=0)
     require_human_approval: bool = False
     best_practices_corpus_uri: str | None = None
+    durable_agents: bool = True
 
 
 class VisualElement(StrictModel):

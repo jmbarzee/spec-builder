@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from temporalio.client import Client
-from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from src.workflows.spec_builder.custom_types import SPEC_BUILDER_TASK_QUEUE
@@ -33,7 +33,7 @@ def build_worker(client: Client) -> Worker:
 
 async def main() -> None:
     """Connect to the local Temporal dev server and run the worker."""
-    client = await Client.connect("localhost:7233", data_converter=pydantic_data_converter)
+    client = await Client.connect("localhost:7233", plugins=[PydanticAIPlugin()])
     worker = build_worker(client)
     await worker.run()
 
