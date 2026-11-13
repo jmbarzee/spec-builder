@@ -738,7 +738,7 @@ async def persist_final_outputs(
         output_directory=str(output_dir),
     )
 
-async def _run_twf(*args: str) -> tuple[int, str]:
+async def _run_twf(*args: str) -> tuple[int, str, str]:
     twf = shutil.which("twf")
     if twf is None:
         raise ApplicationError(
@@ -746,18 +746,25 @@ async def _run_twf(*args: str) -> tuple[int, str]:
             non_retryable=True,
         )
     process = await asyncio.create_subprocess_exec(
-        twf, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        twf, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    output, _ = await process.communicate()
-    return process.returncode or 0, output.decode()
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        process.kill()
+        raise
+    return process.returncode or 0, stdout.decode(), stderr.decode()
 
 
 async def _twf_envelope(command: str, *args: str) -> str:
-    # `parse` and `graph --json` exit 0 on a design with errors; a non-zero exit is the tool failing.
-    code, output = await _run_twf(command, *args)
+    # `parse` and `graph --json` exit 0 on a design with errors; a non-zero exit is the tool
+    # failing, and the same design fails the same way again, so it is not retried.
+    code, stdout, stderr = await _run_twf(command, *args)
     if code:
-        raise ApplicationError(f"`twf {command}` failed with exit {code}: {output.strip()}")
-    return output
+        raise ApplicationError(
+            f"`twf {command}` failed with exit {code}: {stderr.strip()}", non_retryable=True
+        )
+    return stdout
 
 
 @activity.defn
