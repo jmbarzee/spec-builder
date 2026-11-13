@@ -13,11 +13,13 @@ mountNodeTypeStyles();
 /** The design in the visualizer. This module is the lazy chunk; nothing else imports it. */
 export default function TwfVisualizer({ design }: { design: TwfDesign }) {
   return (
-    <div className="twf-scope design-visualizer" data-theme="dark">
-      <Visualizer
-        ast={design.parse as unknown as TWFFile}
-        parserGraph={(design.graph ?? undefined) as ParserGraph | undefined}
-      />
+    <div className="design-visualizer">
+      <div className="twf-scope" data-theme="dark">
+        <Visualizer
+          ast={design.parse as unknown as TWFFile}
+          parserGraph={design.graph as unknown as ParserGraph}
+        />
+      </div>
     </div>
   );
 }

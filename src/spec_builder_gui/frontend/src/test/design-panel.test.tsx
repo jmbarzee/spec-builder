@@ -77,7 +77,7 @@ describe("design panel", () => {
   test("should show the visualizer and the source on an architecture job", async () => {
     mockApi(
       true,
-      jsonResponse({ source: "workflow Foo():\n", parse: { definitions: [] }, graph: null }),
+      jsonResponse({ source: "workflow Foo():\n", parse: { definitions: [] }, graph: { nodes: [] } }),
     );
     renderPage();
 

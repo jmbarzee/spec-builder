@@ -227,7 +227,7 @@ class TwfDesign(ApiModel):
 
     source: str
     parse: dict[str, Any]
-    graph: dict[str, Any] | None = None
+    graph: dict[str, Any]
 
 
 class StoredJobRecord(ApiModel):

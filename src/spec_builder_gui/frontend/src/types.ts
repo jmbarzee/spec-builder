@@ -195,5 +195,5 @@ export type SystemFeatures = {
 export type TwfDesign = {
   source: string;
   parse: Record<string, unknown>;
-  graph: Record<string, unknown> | null;
+  graph: Record<string, unknown>;
 };
