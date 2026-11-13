@@ -30,7 +30,8 @@ env = { PYTHONPATH = "." }
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra -q --cov-report=term-missing --cov-report=xml --cov=src --cov-fail-under=80"
+# --ignore: ai_training examples are standalone projects (own pyproject, torch, Python 3.13)
+addopts = "-ra -q --ignore=src/workflows/examples/ai_training --cov-report=term-missing --cov-report=xml --cov=src --cov-fail-under=80"
 python_files = ["*_tests.py"]
 # pytest-timeout configurations; https://pypi.org/project/pytest-timeout/
 timeout = 5  # 5 seconds timeout per test

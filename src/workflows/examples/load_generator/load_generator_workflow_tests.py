@@ -8,11 +8,11 @@ from temporalio import activity
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.worker import Worker
 
-from src.workflows.load_generator.load_generator_activities import (
+from src.workflows.examples.load_generator.load_generator_activities import (
     NoopActivityInput,
     NoopActivityOutput,
 )
-from src.workflows.load_generator.load_generator_workflow import (
+from src.workflows.examples.load_generator.load_generator_workflow import (
     GenerateLoadWorkflow,
     GenerateLoadWorkflowInput,
     RunActivityWorkflow,

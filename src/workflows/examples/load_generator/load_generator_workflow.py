@@ -4,12 +4,12 @@ To run this workflow, use the following command:
 
 1. Run the worker:
     ```
-    uv run -m src.workflows.load_generator.worker
+    uv run -m src.workflows.examples.load_generator.worker
     ```
 
 2. Run the workflow:
     ```
-    uv run -m src.workflows.load_generator.load_generator_workflow
+    uv run -m src.workflows.examples.load_generator.load_generator_workflow
     ```
 """
 
@@ -22,7 +22,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from pydantic import BaseModel, Field
 
-    from src.workflows.load_generator.load_generator_activities import (
+    from src.workflows.examples.load_generator.load_generator_activities import (
         NoopActivityInput,
         noop_activity,
     )

@@ -8,11 +8,11 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from src.workflows.crawler.crawler_activities import (
+from src.workflows.examples.crawler.crawler_activities import (
     ParseLinksFromUrlInput,
     ParseLinksFromUrlOutput,
 )
-from src.workflows.crawler.crawler_workflow import (
+from src.workflows.examples.crawler.crawler_workflow import (
     CrawlerWorkflow,
     CrawlerWorkflowInput,
     CrawlerWorkflowOutput,
