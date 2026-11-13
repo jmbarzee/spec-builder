@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -13,6 +14,7 @@ from urllib.parse import unquote, urlparse
 
 from pydantic import Field
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from src.workflows.spec_builder.custom_types import (
     AcquisitionOutput,
@@ -40,6 +42,9 @@ from src.workflows.spec_builder.custom_types import (
     SupervisorDecisionInput,
     TemporalBestPracticesReviewInput,
     TraceabilitySummary,
+    TwfDiagnostic,
+    ValidateTwfInput,
+    ValidateTwfOutput,
 )
 from src.workflows.spec_builder.gemini_executor import GeminiAttachment, GeminiExecutor
 from src.workflows.spec_builder.prompts.activity_prompts import (
@@ -733,6 +738,71 @@ async def persist_final_outputs(
         output_directory=str(output_dir),
     )
 
+async def _run_twf(*args: str) -> tuple[int, str, str]:
+    twf = shutil.which("twf")
+    if twf is None:
+        raise ApplicationError(
+            "The `twf` CLI is not installed. Install it with `uv sync --extra architecture`.",
+            non_retryable=True,
+        )
+    process = await asyncio.create_subprocess_exec(
+        twf, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        process.kill()
+        raise
+    return process.returncode or 0, stdout.decode(), stderr.decode()
+
+
+async def _twf_envelope(command: str, *args: str) -> str:
+    # `parse` and `graph --json` exit 0 on a design with errors; a non-zero exit is the tool
+    # failing, and the same design fails the same way again, so it is not retried.
+    code, stdout, stderr = await _run_twf(command, *args)
+    if code:
+        raise ApplicationError(
+            f"`twf {command}` failed with exit {code}: {stderr.strip()}", non_retryable=True
+        )
+    return stdout
+
+
+@activity.defn
+async def validate_twf_design(input: ValidateTwfInput) -> ValidateTwfOutput:
+    """Format a `.twf` design, check it with `twf parse`, and record its parse and graph output."""
+    activity.logger.info("Validate twf design for job %s", input.job_id)
+    twf_dir = _stage_dir(input.job_id, "twf")
+    source_path = twf_dir / "design.twf"
+    _text_write(source_path, input.source)
+
+    # `twf fmt` fixes space indentation. It exits non-zero on indentation it cannot read, which
+    # `twf parse` then reports as a diagnostic, so its exit code is not a failure here.
+    await _run_twf("fmt", str(source_path))
+    parse_output = await _twf_envelope("parse", str(source_path))
+    graph_output = await _twf_envelope("graph", "--json", str(source_path))
+
+    diagnostics = [
+        TwfDiagnostic(
+            severity=finding["severity"],
+            code=finding["code"],
+            line=finding["start"]["line"],
+            column=finding["start"]["column"],
+            message=finding["message"],
+        )
+        for finding in json.loads(parse_output)["diagnostics"]
+    ]
+    return ValidateTwfOutput(
+        source=source_path.read_text(encoding="utf-8"),
+        valid=all(finding.severity != "error" for finding in diagnostics),
+        diagnostics=diagnostics,
+        artifact_uris={
+            "twf_source": _uri_for_path(source_path),
+            "twf_parse_json": _text_write(twf_dir / "parse.json", parse_output),
+            "twf_graph_json": _text_write(twf_dir / "graph.json", graph_output),
+        },
+    )
+
+
 SPEC_BUILDER_ACTIVITIES = [
     acquire_content,
     run_structured_extraction,
@@ -743,4 +813,5 @@ SPEC_BUILDER_ACTIVITIES = [
     run_best_practices_review,
     run_supervisor_decision,
     persist_final_outputs,
+    validate_twf_design,
 ]
