@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import HttpUrl
 
-from src.workflows.crawler.crawler_activities import (
+from src.workflows.examples.crawler.crawler_activities import (
     ParseLinksFromUrlInput,
     ParseLinksFromUrlOutput,
     UrlContent,
@@ -403,7 +403,7 @@ class TestWebPageLinkDiscovery:
         </html>
         """
 
-        with patch("src.workflows.crawler.crawler_activities.fetch_url") as mock_fetch:
+        with patch("src.workflows.examples.crawler.crawler_activities.fetch_url") as mock_fetch:
             # Mock successful page loading
             mock_fetch.return_value = UrlContent(
                 url=target_website, html_content=page_with_links, success=True
@@ -434,7 +434,7 @@ class TestWebPageLinkDiscovery:
         # Given - A user requests link discovery from a web page
         problematic_website = "https://broken-website.com"
 
-        with patch("src.workflows.crawler.crawler_activities.fetch_url") as mock_fetch:
+        with patch("src.workflows.examples.crawler.crawler_activities.fetch_url") as mock_fetch:
             # Mock failed page loading
             mock_fetch.return_value = UrlContent(
                 url=problematic_website, html_content="", success=False
@@ -465,7 +465,7 @@ class TestWebPageLinkDiscovery:
         target_website = "https://example.com"
         broken_html_content = "<html><body><a href='incomplete-link"  # Intentionally malformed
 
-        with patch("src.workflows.crawler.crawler_activities.fetch_url") as mock_fetch:
+        with patch("src.workflows.examples.crawler.crawler_activities.fetch_url") as mock_fetch:
             # Mock page with broken HTML
             mock_fetch.return_value = UrlContent(
                 url=target_website, html_content=broken_html_content, success=True

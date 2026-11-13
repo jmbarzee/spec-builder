@@ -7,8 +7,8 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
-from src.workflows.load_generator.load_generator_activities import noop_activity
-from src.workflows.load_generator.load_generator_workflow import (
+from src.workflows.examples.load_generator.load_generator_activities import noop_activity
+from src.workflows.examples.load_generator.load_generator_workflow import (
     GenerateLoadWorkflow,
     RunActivityWorkflow,
 )

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.workflows.load_generator.load_generator_activities import (
+from src.workflows.examples.load_generator.load_generator_activities import (
     NoopActivityInput,
     noop_activity,
 )

@@ -9,7 +9,7 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from pydantic import BaseModel, HttpUrl
 
-    from src.workflows.crawler.crawler_activities import (
+    from src.workflows.examples.crawler.crawler_activities import (
         ParseLinksFromUrlInput,
         ParseLinksFromUrlOutput,
         parse_links_from_url,

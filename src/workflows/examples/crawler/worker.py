@@ -8,8 +8,8 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
-from src.workflows.crawler.crawler_activities import parse_links_from_url
-from src.workflows.crawler.crawler_workflow import CrawlerWorkflow
+from src.workflows.examples.crawler.crawler_activities import parse_links_from_url
+from src.workflows.examples.crawler.crawler_workflow import CrawlerWorkflow
 
 
 async def main() -> None:

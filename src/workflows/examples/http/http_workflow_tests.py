@@ -8,7 +8,7 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from src.workflows.http.http_workflow import (
+from src.workflows.examples.http.http_workflow import (
     HttpWorkflow,
     HttpWorkflowInput,
     HttpWorkflowOutput,
