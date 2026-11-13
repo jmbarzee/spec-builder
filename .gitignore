@@ -21,6 +21,7 @@ bin/
 .demo_builder_gui_uploads/
 .spec_builder_runtime/
 src/spec_builder_gui/frontend/dist/
+src/spec_builder_gui/frontend/*.tsbuildinfo
 
 # MacOS
 .DS_Store

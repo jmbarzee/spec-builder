@@ -1,5 +1,4 @@
 // @vitest-environment node
-import { fileURLToPath } from "node:url";
 
 import { build } from "vite";
 import type { OutputAsset, OutputChunk, RollupOutput } from "rollup";
@@ -12,8 +11,6 @@ const PAGE_RULE = /(^|[}{,])\s*(html|body|\*|:root|#root)(?![\w-])/;
 describe("design view build", () => {
   test("should emit the visualizer as a lazy chunk with scoped styles", async () => {
     const result = (await build({
-      // The .ts file, since a stale compiled vite.config.js would otherwise win.
-      configFile: fileURLToPath(new URL("../../vite.config.ts", import.meta.url)),
       logLevel: "silent",
       build: { write: false },
     })) as RollupOutput;
